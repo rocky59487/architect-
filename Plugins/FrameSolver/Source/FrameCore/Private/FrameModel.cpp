@@ -38,16 +38,21 @@ bool FrameModel::validate(std::string& why) const {
         const int ni = nodeIndex(m.i), nj = nodeIndex(m.j);
         if (ni < 0 || nj < 0)            { why = "member references missing node"; return false; }
         if (m.i == m.j)                  { why = "member endpoints identical (i == j)"; return false; }
-        if (!m.mat || !m.sec)            { why = "member missing material/section"; return false; }
+        if (m.matIdx < 0 || m.matIdx >= static_cast<int>(materials.size()))
+                                         { why = "member material index out of range"; return false; }
+        if (m.secIdx < 0 || m.secIdx >= static_cast<int>(sections.size()))
+                                         { why = "member section index out of range"; return false; }
+        const Material& mat = materials[static_cast<size_t>(m.matIdx)];
+        const Section&  sec = sections[static_cast<size_t>(m.secIdx)];
         if (!finiteVec3(m.refVec))       { why = "member has non-finite reference vector"; return false; }
-        if (!std::isfinite(m.mat->E) || !std::isfinite(m.mat->G) || !std::isfinite(m.mat->nu))
+        if (!std::isfinite(mat.E) || !std::isfinite(mat.G) || !std::isfinite(mat.nu))
                                          { why = "member material has non-finite property"; return false; }
-        if (m.mat->E <= 0 || m.mat->G <= 0) { why = "non-positive E or G"; return false; }
-        if (!std::isfinite(m.sec->A) || !std::isfinite(m.sec->Iy) || !std::isfinite(m.sec->Iz) ||
-            !std::isfinite(m.sec->J) || !std::isfinite(m.sec->cy) || !std::isfinite(m.sec->cz) ||
-            !std::isfinite(m.sec->Asy) || !std::isfinite(m.sec->Asz))
+        if (mat.E <= 0 || mat.G <= 0)    { why = "non-positive E or G"; return false; }
+        if (!std::isfinite(sec.A) || !std::isfinite(sec.Iy) || !std::isfinite(sec.Iz) ||
+            !std::isfinite(sec.J) || !std::isfinite(sec.cy) || !std::isfinite(sec.cz) ||
+            !std::isfinite(sec.Asy) || !std::isfinite(sec.Asz))
                                          { why = "member section has non-finite property"; return false; }
-        if (m.sec->A <= 0 || m.sec->Iy <= 0 || m.sec->Iz <= 0 || m.sec->J <= 0)
+        if (sec.A <= 0 || sec.Iy <= 0 || sec.Iz <= 0 || sec.J <= 0)
                                          { why = "non-positive section property"; return false; }
         if (norm(nodes[nj].pos - nodes[ni].pos) <= 0) { why = "coincident member endpoints"; return false; }
     }
@@ -75,11 +80,13 @@ bool FrameModel::validate(std::string& why) const {
         for (int a = 0; a < 4; ++a)
             for (int b = a + 1; b < 4; ++b)
                 if (s.n[a] == s.n[b]) { why = "shell has duplicate corner nodes"; return false; }
-        if (!s.mat)                          { why = "shell missing material"; return false; }
-        if (!std::isfinite(s.mat->E) || !std::isfinite(s.mat->G) || !std::isfinite(s.mat->nu))
+        if (s.matIdx < 0 || s.matIdx >= static_cast<int>(materials.size()))
+                                             { why = "shell material index out of range"; return false; }
+        const Material& smat = materials[static_cast<size_t>(s.matIdx)];
+        if (!std::isfinite(smat.E) || !std::isfinite(smat.G) || !std::isfinite(smat.nu))
                                              { why = "shell material has non-finite property"; return false; }
-        if (s.mat->E <= 0 || s.mat->G <= 0)  { why = "shell non-positive E or G"; return false; }
-        if (s.mat->nu < 0 || s.mat->nu >= 0.5) { why = "shell Poisson ratio out of [0,0.5)"; return false; }
+        if (smat.E <= 0 || smat.G <= 0)      { why = "shell non-positive E or G"; return false; }
+        if (smat.nu < 0 || smat.nu >= 0.5)   { why = "shell Poisson ratio out of [0,0.5)"; return false; }
         if (!std::isfinite(s.t))             { why = "shell non-finite thickness"; return false; }
         if (s.t <= 0)                        { why = "shell non-positive thickness"; return false; }
         const Vec3 nrm = cross(nodes[idx[2]].pos - nodes[idx[0]].pos,

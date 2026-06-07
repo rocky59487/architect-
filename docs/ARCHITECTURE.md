@@ -39,10 +39,10 @@ elements. This document covers the conventions, data model, solve pipeline, elem
 | `ShellElementForces` | per-shell stress resultants in the facet frame: `{Mxx,Myy,Mxy,Qx,Qy,Nxx,Nyy,Nxy}` (in `SolveResult.shellForces`) |
 | `FrameModel` | vectors of the above (`members` **and** `shells` are parallel element sources) + `materials`/`sections` storage (keeps the pointers alive) + `validate()` + `dofCount()` |
 
-**Pointer-lifetime invariant.** `Member` captures raw `const Material*`/`const Section*` into
-`FrameModel::materials`/`sections`. Those vectors must be `reserve()`-d to their final size and
-fully populated *before* any `Member` captures a pointer; otherwise a `push_back` reallocation
-dangles every captured pointer. The fixtures and builders all follow "reserve → push → capture".
+**Material/Section by index.** `Member`/`ShellQuad` reference their material & section by INDEX
+(`matIdx`/`secIdx`) into `FrameModel::materials`/`sections`, not by raw pointer — so adding
+nodes/members/materials can never dangle them and there is no "reserve before capture" rule.
+`validate()` range-checks the indices (and the earlier raw-pointer footgun is gone).
 
 **`validate()`** rejects: no nodes, *no members **and** no shells*, a member referencing a missing
 node, identical or coincident endpoints, null material/section, non-positive `E/G` or `A/Iy/Iz/J`;

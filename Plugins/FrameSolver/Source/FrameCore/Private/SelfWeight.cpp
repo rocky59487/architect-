@@ -11,8 +11,10 @@ void addSelfWeight(FrameModel& m, real g) {
     // ---- beams: gravity as a LOCAL uniformly distributed load (so sloped/vertical
     // members are correct). w_global = (0,0,-rho*A*g*1e-12); rotate into local axes. ----
     for (const auto& mem : m.members) {
-        if (!mem.mat || !mem.sec) continue;
-        const real wg = mem.mat->rho * mem.sec->A * g * kRhoConv;   // N/mm (downward)
+        if (mem.matIdx < 0 || mem.matIdx >= static_cast<int>(m.materials.size()) ||
+            mem.secIdx < 0 || mem.secIdx >= static_cast<int>(m.sections.size())) continue;
+        const real wg = m.materials[static_cast<size_t>(mem.matIdx)].rho
+                      * m.sections[static_cast<size_t>(mem.secIdx)].A * g * kRhoConv;   // N/mm (downward)
         if (wg == 0.0) continue;
         const int ni = m.nodeIndex(mem.i), nj = m.nodeIndex(mem.j);
         if (ni < 0 || nj < 0) continue;
@@ -28,7 +30,7 @@ void addSelfWeight(FrameModel& m, real g) {
     // (On a regular mesh the A/4 lumping equals the consistent integral of the bilinear
     // shape functions, so it matches a transverse ShellPressure of rho*t*g.) ----
     for (const auto& sh : m.shells) {
-        if (!sh.mat) continue;
+        if (sh.matIdx < 0 || sh.matIdx >= static_cast<int>(m.materials.size())) continue;
         int idx[4];
         bool ok = true;
         for (int k = 0; k < 4; ++k) { idx[k] = m.nodeIndex(sh.n[k]); if (idx[k] < 0) ok = false; }
@@ -36,7 +38,7 @@ void addSelfWeight(FrameModel& m, real g) {
         const Vec3 p0 = m.nodes[idx[0]].pos, p1 = m.nodes[idx[1]].pos;
         const Vec3 p2 = m.nodes[idx[2]].pos, p3 = m.nodes[idx[3]].pos;
         const real area = 0.5 * norm(cross(p2 - p0, p3 - p1));
-        const real W    = sh.mat->rho * sh.t * g * kRhoConv * area;  // total facet weight (N)
+        const real W    = m.materials[static_cast<size_t>(sh.matIdx)].rho * sh.t * g * kRhoConv * area;  // total facet weight (N)
         if (W == 0.0) continue;
         const real perNode = -0.25 * W;                              // global -Z, split 4 ways
         for (int k = 0; k < 4; ++k) {

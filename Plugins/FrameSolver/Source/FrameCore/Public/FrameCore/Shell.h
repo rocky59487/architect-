@@ -14,14 +14,14 @@ namespace frame {
 // (4 nodes x 6) local stiffness. A model may contain members only, shells only, or
 // both.
 struct ShellQuad {
-    int             id  = 0;
-    NodeId          n[4]{ 0, 0, 0, 0 };   // corner node ids, CCW about the +normal
-    const Material* mat = nullptr;        // needs E, nu, G (G = E / [2(1+nu)])
-    real            t   = 0;              // thickness (mm)
+    int    id  = 0;
+    NodeId n[4]{ 0, 0, 0, 0 };   // corner node ids, CCW about the +normal
+    int    matIdx = -1;          // index into FrameModel::materials (needs E, nu, G = E/[2(1+nu)])
+    real   t   = 0;              // thickness (mm)
 
     ShellQuad() = default;
-    ShellQuad(int id_, NodeId a, NodeId b, NodeId c, NodeId d, const Material* m, real t_)
-        : id(id_), n{ a, b, c, d }, mat(m), t(t_) {}
+    ShellQuad(int id_, NodeId a, NodeId b, NodeId c, NodeId d, int matIdx_, real t_)
+        : id(id_), n{ a, b, c, d }, matIdx(matIdx_), t(t_) {}
 };
 
 // Uniform transverse pressure on a shell facet (force / area), applied along the

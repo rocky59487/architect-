@@ -19,18 +19,20 @@ bool BeamColumnElement::prepare(const FrameModel& model, const SolveOptions& opt
     const Mat3 Rm = localAxes(pi, pj, mem.refVec);
     // Timoshenko (shear-flexible) only when explicitly enabled AND the section
     // carries shear areas; otherwise the Euler-Bernoulli element, bit-for-bit.
-    if (opts.useTimoshenko && mem.sec->Asy > 0 && mem.sec->Asz > 0) {
-        kl_ = localStiffness12T(mem.mat->E, mem.mat->G, mem.sec->A,
-                                mem.sec->Iy, mem.sec->Iz, mem.sec->J, L_,
-                                mem.sec->Asy, mem.sec->Asz);
+    const Material& mat = model.materials[static_cast<size_t>(mem.matIdx)];
+    const Section&  sec = model.sections[static_cast<size_t>(mem.secIdx)];
+    if (opts.useTimoshenko && sec.Asy > 0 && sec.Asz > 0) {
+        kl_ = localStiffness12T(mat.E, mat.G, sec.A,
+                                sec.Iy, sec.Iz, sec.J, L_,
+                                sec.Asy, sec.Asz);
     } else {
-        kl_ = localStiffness12(mem.mat->E, mem.mat->G, mem.sec->A,
-                               mem.sec->Iy, mem.sec->Iz, mem.sec->J, L_);
+        kl_ = localStiffness12(mat.E, mat.G, sec.A,
+                               sec.Iy, sec.Iz, sec.J, L_);
     }
     T_  = transform12(Rm);
     // consistent mass (rho kg/m^3 -> tonne/mm^3 via 1e-12). Not condensed by releases
     // (releases are a static device; modal analysis uses the unreleased element).
-    ml_ = localMass12(mem.mat->rho * 1.0e-12, mem.sec->A, mem.sec->Iy, mem.sec->Iz, L_);
+    ml_ = localMass12(mat.rho * 1.0e-12, sec.A, sec.Iy, sec.Iz, L_);
     for (int d = 0; d < 6; ++d) { dofs_[d] = gdof(ni, d); dofs_[6 + d] = gdof(nj, d); }
 
     // ---- fixed-end forces Qf (local) from this member's UDLs. Same per-element

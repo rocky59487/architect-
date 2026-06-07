@@ -74,7 +74,7 @@ FrameModel makeTower(int nx, int ny, int stories) {
         return m.nodes[static_cast<size_t>(id)].pos; // ids are contiguous by construction.
     };
     auto addMember = [&](int i, int j, int sec) {
-        Member mem(static_cast<int>(m.members.size()), i, j, &m.materials[0], &m.sections[static_cast<size_t>(sec)]);
+        Member mem(static_cast<int>(m.members.size()), i, j, 0, sec);   // material index 0
         mem.refVec = refVecFor(nodePos(i), nodePos(j));
         m.members.push_back(mem);
     };

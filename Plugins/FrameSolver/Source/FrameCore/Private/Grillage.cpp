@@ -46,20 +46,14 @@ bool buildGrillage(FrameModel& m, const PlateSpec& spec, const Material& mat, st
     const real nu = (mat.G > 0) ? (mat.E / (2.0 * mat.G) - 1.0) : 0.0;
     if (!(nu > -0.999 && nu < 0.5)) { why = "grillage: implausible Poisson ratio from E,G (need G=E/2(1+nu))"; return false; }
 
-    // one material; four strip sections (full / half tributary width in each direction).
-    m.materials.reserve(1);
-    m.materials.push_back(mat);
-    const Material* pm = &m.materials.back();
-
-    m.sections.reserve(4);
+    // one material (index 0); four strip sections (full / half tributary width in each
+    // direction) at indices 0..3. Members reference them by index (no pointer capture).
+    m.materials.push_back(mat);                            // material index 0
     m.sections.push_back(stripSection(dy,        t, nu));  // 0 longitudinal interior (width dy)
     m.sections.push_back(stripSection(dy / 2.0,  t, nu));  // 1 longitudinal edge
     m.sections.push_back(stripSection(dx,        t, nu));  // 2 transverse interior (width dx)
     m.sections.push_back(stripSection(dx / 2.0,  t, nu));  // 3 transverse edge
-    const Section* sLongFull = &m.sections[0];
-    const Section* sLongHalf = &m.sections[1];
-    const Section* sTranFull = &m.sections[2];
-    const Section* sTranHalf = &m.sections[3];
+    constexpr int kLongFull = 0, kLongHalf = 1, kTranFull = 2, kTranHalf = 3;
 
     // grid nodes: lock the in-plane DOFs everywhere (grillage carries only out-of-plane
     // action); a simply-supported boundary fixes Uz on the four edges.
@@ -76,14 +70,14 @@ bool buildGrillage(FrameModel& m, const PlateSpec& spec, const Material& mat, st
     // longitudinal (x) + transverse (y) beams; default refVec=+Z is valid (none vertical).
     MemberId mid = 0;
     for (int j = 0; j <= ny; ++j) {
-        const Section* s = (j == 0 || j == ny) ? sLongHalf : sLongFull;
+        const int sIdx = (j == 0 || j == ny) ? kLongHalf : kLongFull;
         for (int i = 0; i < nx; ++i)
-            m.members.push_back(Member(mid++, gridNode(i, j, nx), gridNode(i + 1, j, nx), pm, s));
+            m.members.push_back(Member(mid++, gridNode(i, j, nx), gridNode(i + 1, j, nx), 0, sIdx));
     }
     for (int i = 0; i <= nx; ++i) {
-        const Section* s = (i == 0 || i == nx) ? sTranHalf : sTranFull;
+        const int sIdx = (i == 0 || i == nx) ? kTranHalf : kTranFull;
         for (int j = 0; j < ny; ++j)
-            m.members.push_back(Member(mid++, gridNode(i, j, nx), gridNode(i, j + 1, nx), pm, s));
+            m.members.push_back(Member(mid++, gridNode(i, j, nx), gridNode(i, j + 1, nx), 0, sIdx));
     }
 
     // uniform pressure q -> consistent nodal loads (q * tributary area), downward (-z).

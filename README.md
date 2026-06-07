@@ -160,12 +160,11 @@ mat.cap = Capacity::make(300.0, 300.0, 180.0);      // allowable comp/tens/shear
 Section sec = Section::Rectangular(100.0, 100.0);   // b, d (mm)
 
 FrameModel m;
-m.materials = { mat };  m.sections = { sec };
-const Material* pm = &m.materials.back();  const Section* ps = &m.sections.back();
+m.materials = { mat };  m.sections = { sec };       // material index 0, section index 0
 Node n0(0, 0,0,0);  n0.fixAll();                    // encastre base
 Node n1(1, 2000,0,0);                               // 2 m cantilever
 m.nodes = { n0, n1 };
-m.members = { Member(0, 0, 1, pm, ps) };
+m.members = { Member(0, 0, 1, 0, 0) };              // matIdx = 0, secIdx = 0
 NodalLoad p;  p.node = 1;  p.comp[Uz] = -1000.0;    // 1 kN tip load
 m.nodalLoads = { p };
 
@@ -177,9 +176,10 @@ if (!r.singular) {
 }
 ```
 
-> **Pointer-lifetime rule:** `Member` holds `const Material*`/`const Section*` into the model's
-> own vectors. `reserve()` those vectors to their final size *before* pushing, and capture the
-> pointers only after all pushes — otherwise a reallocation dangles them.
+> **Material/Section by index:** `Member`/`ShellQuad` reference their material & section by
+> **index** (`matIdx`/`secIdx`) into `FrameModel::materials`/`sections`, not by raw pointer — so
+> adding nodes/members/materials can never dangle them (no "reserve before capture" rule).
+> `validate()` range-checks the indices.
 
 ---
 

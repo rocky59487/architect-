@@ -283,9 +283,10 @@ bool MITC4ShellElement::prepare(const FrameModel& model, const SolveOptions& /*o
     const ShellQuad& sh = model.shells[static_cast<size_t>(s_)];
     id_ = sh.id;
     t_  = sh.t;
-    E_  = sh.mat->E;
-    nu_ = sh.mat->nu;
-    G_  = sh.mat->G;
+    const Material& smat = model.materials[static_cast<size_t>(sh.matIdx)];
+    E_  = smat.E;
+    nu_ = smat.nu;
+    G_  = smat.G;
 
     int idx[4];
     for (int k = 0; k < 4; ++k) {
@@ -339,7 +340,7 @@ bool MITC4ShellElement::prepare(const FrameModel& model, const SolveOptions& /*o
     kl_ += Pm.transpose() * Km * Pm;
 
     // consistent mass (rho kg/m^3 -> tonne/mm^3 via 1e-12) for modal analysis
-    ml_ = shellMass24(xl_, yl_, sh.mat->rho * 1.0e-12, t_);
+    ml_ = shellMass24(xl_, yl_, smat.rho * 1.0e-12, t_);
 
     // ---- transverse pressure -> consistent nodal loads on the local-w (Uz) DOFs.
     // Qf_ holds the LOCAL equivalent nodal load; addEquivalentNodalLoads rotates it

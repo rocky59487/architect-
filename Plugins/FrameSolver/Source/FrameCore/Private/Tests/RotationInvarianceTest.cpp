@@ -43,11 +43,11 @@ bool FFrameCoreRotationInvarianceTest::RunTest(const FString&)
 	FrameModel mr;
 	mr.materials.reserve(1); mr.sections.reserve(1);
 	mr.materials.push_back(mat); mr.sections.push_back(sec);
-	const Material* pm = &mr.materials.back(); const Section* ps = &mr.sections.back();
+	// material + section are referenced by index 0 (mat at materials[0], sec at sections[0])
 	Node n0(0, 0, 0, 0); n0.fixAll();
 	Node n1(1, rot(L,0,0,0), rot(L,0,0,1), rot(L,0,0,2));
 	mr.nodes = { n0, n1 };
-	Member mm(0, 0, 1, pm, ps);
+	Member mm(0, 0, 1, 0, 0);
 	mm.refVec = Vec3(rot(0,0,1,0), rot(0,0,1,1), rot(0,0,1,2));
 	mr.members = { mm };
 	NodalLoad nl; nl.node = 1;

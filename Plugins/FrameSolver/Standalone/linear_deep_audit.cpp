@@ -172,14 +172,12 @@ void testSlopedSelfWeight() {
     Material mat(200000.0, 76923.076923, 7850.0);
     Section sec = Section::Rectangular(220.0, 360.0);
     FrameModel m;
-    m.materials.push_back(mat);
-    m.sections.push_back(sec);
-    const Material* pm = &m.materials.back();
-    const Section* ps = &m.sections.back();
+    m.materials.push_back(mat);   // index 0
+    m.sections.push_back(sec);    // index 0
     Node n0(0, 0.0, 0.0, 0.0); n0.fixAll();
     Node n1(1, 3000.0, 0.0, 4000.0);
     m.nodes = { n0, n1 };
-    m.members = { Member(0, 0, 1, pm, ps) };
+    m.members = { Member(0, 0, 1, 0, 0) };
 
     const real g = 9810.0;
     addSelfWeight(m, g);
@@ -566,13 +564,12 @@ void testMITC4SoftMode() {
     mat.G  = mat.E / (2.0 * (1.0 + mat.nu));
     const real a = 1000.0, t = 100.0;
     FrameModel m;
-    m.materials.push_back(mat);
-    const Material* pm = &m.materials.back();
+    m.materials.push_back(mat);   // index 0
     m.nodes.push_back(Node(0, 0, 0, 0));
     m.nodes.push_back(Node(1, a, 0, 0));
     m.nodes.push_back(Node(2, a, a, 0));
     m.nodes.push_back(Node(3, 0, a, 0));
-    m.shells.push_back(ShellQuad(0, 0, 1, 2, 3, pm, t));
+    m.shells.push_back(ShellQuad(0, 0, 1, 2, 3, 0, t));
 
     MITC4ShellElement el(0);
     std::string why;

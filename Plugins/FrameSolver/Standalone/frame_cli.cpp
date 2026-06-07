@@ -95,16 +95,13 @@ int main() {
     }
     model.members.reserve(mems.size());
     for (const auto& mm : mems) {
-        const Material* pm = &model.materials[(size_t)mm.mat];
-        const Section*  ps = &model.sections[(size_t)mm.sec];
-        Member fmem(mm.id, mm.i, mm.j, pm, ps);
+        Member fmem(mm.id, mm.i, mm.j, mm.mat, mm.sec);   // mat/sec are already pool indices
         fmem.refVec = Vec3(mm.rx, mm.ry, mm.rz);
         model.members.push_back(fmem);
     }
     model.shells.reserve(shes.size());
     for (const auto& s : shes) {
-        const Material* pm = &model.materials[(size_t)s.mat];
-        model.shells.push_back(ShellQuad(s.id, s.n[0], s.n[1], s.n[2], s.n[3], pm, s.t));
+        model.shells.push_back(ShellQuad(s.id, s.n[0], s.n[1], s.n[2], s.n[3], s.mat, s.t));
     }
     for (const auto& l : nls) { NodalLoad nl; nl.node=l.node; for (int k=0;k<6;++k) nl.comp[k]=l.c[k]; model.nodalLoads.push_back(nl); }
     for (const auto& u : udls) { MemberUDL mu; mu.member=u.member; mu.w_local=Vec3(u.wx,u.wy,u.wz); model.memberUDLs.push_back(mu); }

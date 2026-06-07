@@ -17,11 +17,14 @@ FRAMECORE_API std::array<bool, 12> makeRelease(ReleasePreset p);
 
 // A prismatic 3D beam-column connecting node i -> node j.
 struct Member {
-    MemberId        id  = 0;
-    NodeId          i   = 0;
-    NodeId          j   = 0;
-    const Material* mat = nullptr;
-    const Section*  sec = nullptr;
+    MemberId id  = 0;
+    NodeId   i   = 0;
+    NodeId   j   = 0;
+    // Material / Section are referenced by INDEX into FrameModel::materials / ::sections,
+    // NOT by raw pointer: pushing more nodes/members/materials can never dangle them, so
+    // there is no "reserve before capturing pointers" rule. validate() range-checks them.
+    int      matIdx = -1;
+    int      secIdx = -1;
 
     // Reference vector defining the local x-y plane. Default global +Z; the
     // solver falls back to +Y automatically when refVec is parallel to the axis.
@@ -32,8 +35,8 @@ struct Member {
     std::array<bool, 12> release { {} };
 
     Member() = default;
-    Member(MemberId id_, NodeId i_, NodeId j_, const Material* m, const Section* s)
-        : id(id_), i(i_), j(j_), mat(m), sec(s) {}
+    Member(MemberId id_, NodeId i_, NodeId j_, int matIdx_, int secIdx_)
+        : id(id_), i(i_), j(j_), matIdx(matIdx_), secIdx(secIdx_) {}
 };
 
 } // namespace frame
