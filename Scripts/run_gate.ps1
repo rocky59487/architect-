@@ -5,6 +5,7 @@
 # Prints a combined PASS/FAIL summary and sets the exit code (0 = all green).
 #
 # Usage:  powershell -ExecutionPolicy Bypass -File E:\project\ArchSim\Scripts\run_gate.ps1
+param([switch]$RequireOpenSees)   # CI: fail (not skip) when openseespy is absent
 $ErrorActionPreference = 'Continue'
 
 $Root   = 'E:\project\ArchSim'
@@ -59,8 +60,14 @@ Write-Host ("       OpenSees compare: {0} (exit {1})" -f $OsState, $OsRC)
 # ---- verdict ----
 Write-Host ''
 Write-Host '======================================================'
-# OpenSees leg passes when it matches (0) OR is unavailable (2); only a real diff (1) fails.
-$GateOk = ($StandaloneRC -eq 0) -and ($UeExit -eq 0) -and ($Total -gt 0) -and ($OsRC -ne 1)
+# OpenSees leg: a real diff (1) always fails. Absence (2) is a soft skip locally, but a hard
+# fail under -RequireOpenSees (CI), so the cross-validation can never silently vanish.
+if ($OsRC -eq 2) {
+    if ($RequireOpenSees) { Write-Host '       OpenSees REQUIRED but openseespy absent -> FAIL' -ForegroundColor Red }
+    else { Write-Host '       (OpenSees skipped: openseespy absent; pass -RequireOpenSees to enforce in CI)' -ForegroundColor Yellow }
+}
+$OsOk = if ($RequireOpenSees) { $OsRC -eq 0 } else { $OsRC -ne 1 }
+$GateOk = ($StandaloneRC -eq 0) -and ($UeExit -eq 0) -and ($Total -gt 0) -and $OsOk
 if ($GateOk) {
     Write-Host (" GATE: PASS  (standalone OK, UE {0} tests green, OpenSees {1})" -f $Total, $OsState) -ForegroundColor Green
     exit 0

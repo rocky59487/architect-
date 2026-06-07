@@ -19,7 +19,6 @@ struct FrameModel {
     std::vector<Section>         sections;    // optional storage to keep refs alive
     std::vector<NodalLoad>       nodalLoads;
     std::vector<MemberUDL>       memberUDLs;
-    std::vector<MemberPointLoad> memberPointLoads;
 
     int dofCount() const { return DOF_PER_NODE * static_cast<int>(nodes.size()); }
 

@@ -33,14 +33,7 @@ cl /nologo /EHsc /std:c++17 /O2 /MD /utf-8 /DEIGEN_MPL2_ONLY ^
    Source\FrameCore\Private\BeamColumnElement.cpp ^
    Source\FrameCore\Private\FrameSolver.cpp ^
    Source\FrameCore\Private\ElasticAllowable.cpp ^
-   Source\FrameCore\Private\EquivalentModeling.cpp ^
-   Source\FrameCore\Private\Connectivity.cpp ^
-   Source\FrameCore\Private\FiberSection.cpp ^
-   Source\FrameCore\Private\Pushover.cpp ^
-   Source\FrameCore\Private\StaticCondensation.cpp ^
    Source\FrameCore\Private\Grillage.cpp ^
-   Source\FrameCore\Private\DamageField.cpp ^
-   Source\FrameCore\Private\Construction.cpp ^
    Standalone\frame_cli.cpp
 if errorlevel 1 ( echo [build_cli] COMPILE FAILED & popd & exit /b 1 )
 

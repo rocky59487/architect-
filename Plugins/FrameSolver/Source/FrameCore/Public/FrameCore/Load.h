@@ -16,11 +16,4 @@ struct MemberUDL {
     Vec3     w_local;
 };
 
-// Concentrated load on a member at distance a from end i, in LOCAL coordinates.
-struct MemberPointLoad {
-    MemberId member = 0;
-    Vec3     p_local;
-    real     a = 0;
-};
-
 } // namespace frame

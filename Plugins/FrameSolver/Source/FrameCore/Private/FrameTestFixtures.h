@@ -134,21 +134,4 @@ inline void circularArchCantilever(FrameModel& m, real R, int nSeg, real P,
     m.nodalLoads = { nl };
 }
 
-// #10 Schur static condensation: a straight cantilever along +X split into 3 elements
-// (4 nodes). node0 encastre; nodes 1,2,3 free. A transverse point load P (global +Z)
-// sits at the INTERNAL node2, so condensing nodes 1,2 away forces fEff to fold an
-// internal load onto the boundary (the part of the math most likely to be wrong if
-// only K is condensed and the load is not). Boundary = node0 + node3.
-inline void condensationChain(FrameModel& m, real P, real L, const Material& mat, const Section& sec) {
-    const Material* pm; const Section* ps; prepMatSec(m, mat, sec, pm, ps);
-    Node n0(0, 0,       0, 0); n0.fixAll();
-    Node n1(1, L,       0, 0);
-    Node n2(2, 2.0 * L, 0, 0);
-    Node n3(3, 3.0 * L, 0, 0);
-    m.nodes   = { n0, n1, n2, n3 };
-    m.members = { Member(0, 0, 1, pm, ps), Member(1, 1, 2, pm, ps), Member(2, 2, 3, pm, ps) };
-    NodalLoad nl; nl.node = 2; nl.comp[Uz] = P;
-    m.nodalLoads = { nl };
-}
-
 }} // namespace frame::fixtures

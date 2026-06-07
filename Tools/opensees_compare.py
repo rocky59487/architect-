@@ -252,9 +252,16 @@ def main():
             print("[FAIL] could not build frame_cli.exe")
             return 2
 
-    TOL_DISP_VS_OS = 1e-4      # our engine vs OpenSees (both linear EB)
-    TOL_FORCE_VS_OS = 1e-3
-    TOL_VS_ANALYTIC = 2e-3
+    # Gate tolerances are STRICT by default (the engine matches OpenSees to ~1e-12, so a
+    # loose gate would not catch a precision regression). Pass --relaxed for a cross-platform
+    # report run where floating-point/BLAS differences make sub-1e-8 agreement unrealistic.
+    relaxed = ("--relaxed" in sys.argv)
+    if relaxed:
+        TOL_DISP_VS_OS, TOL_FORCE_VS_OS, TOL_VS_ANALYTIC = 1e-4, 1e-3, 2e-3
+    else:
+        TOL_DISP_VS_OS, TOL_FORCE_VS_OS, TOL_VS_ANALYTIC = 1e-8, 1e-8, 1e-6
+    print(f"  tolerances: {'RELAXED (report)' if relaxed else 'STRICT (gate)'}  "
+          f"disp={TOL_DISP_VS_OS:.0e} force={TOL_FORCE_VS_OS:.0e} analytic={TOL_VS_ANALYTIC:.0e}")
 
     models = [model_cantilever3d(), model_cantilever_rect(), model_portal_rc()]
     failures = 0

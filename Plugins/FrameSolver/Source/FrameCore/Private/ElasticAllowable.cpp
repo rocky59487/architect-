@@ -22,13 +22,16 @@ DemandResult ElasticAllowable::checkSection(const MemberEndForces& f, const Sect
                        : std::abs(f.My) / Wy + std::abs(f.Mz) / Wz;
     const real sComp = std::max(sM + sN, real(0));
     const real sTens = std::max(sM - sN, real(0));
-    const real tau   = std::sqrt(f.Vy * f.Vy + f.Vz * f.Vz) / A;
-    // Torsional shear ~ T*c/J  (c = extreme-fibre / corner distance). Units:
-    // N*mm * mm / mm^4 = N/mm^2 = MPa -- comparable to the shear capacity.
-    // (The old |T|/J was N/mm^3, dimensionally wrong.) Exact for circular,
-    // conservative for rectangles; true rectangular torsion needs St-Venant
-    // warping (deferred to the advanced fibre layer, per spec §0).
-    const real cTor  = std::hypot(s.cy, s.cz);
+    // Transverse shear stress. V/A is the cross-section AVERAGE; the peak (at the neutral
+    // axis) is k*V/A with k = 1.5 for a rectangle and 4/3 for a circle. We screen on the
+    // peak so a shear-controlled member is not under-checked.
+    const real shearPeak = (s.shape == Section::Shape::Circular) ? real(4.0 / 3.0) : real(1.5);
+    const real tau   = shearPeak * std::sqrt(f.Vy * f.Vy + f.Vz * f.Vz) / A;
+    // Torsional shear ~ T*c/J  (c = extreme-fibre distance). Units N*mm*mm/mm^4 = MPa,
+    // comparable to the shear capacity. For a CIRCLE this is the exact max shear T*r/J at
+    // the surface (c = r); for a RECTANGLE we use the diagonal corner hypot(cy,cz) as a
+    // conservative heuristic (true St-Venant rectangular torsion needs warping, deferred).
+    const real cTor  = (s.shape == Section::Shape::Circular) ? s.cy : std::hypot(s.cy, s.cz);
     const real sTor  = std::abs(f.T) * cTor / Jt;
 
     auto ratio = [](real demand, real cap) -> real {
