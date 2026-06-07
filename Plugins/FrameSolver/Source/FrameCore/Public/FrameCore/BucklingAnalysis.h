@@ -8,7 +8,8 @@ namespace frame {
 // geometric stiffness Kg from the resulting member axial forces, and finds the smallest factor
 // lambda such that (K + lambda*Kg) is singular. P_cr = lambda * (applied reference load). For
 // a slender column this reproduces the Euler load pi^2 EI/(KL)^2. Beam-column geometric
-// stiffness only (shell geometric stiffness is a future addition). Linear buckling = the onset
+// stiffness only (shell geometric stiffness is a future addition). Tension-only members are
+// ignored in Kg because they are stabilizing, not buckling sources. Linear buckling = the onset
 // eigenvalue, NOT a nonlinear post-buckling path.
 FRAMECORE_API BucklingResult solveBuckling(const PreparedSystem& prepared, const FrameModel& model);
 

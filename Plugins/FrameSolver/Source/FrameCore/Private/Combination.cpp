@@ -53,6 +53,17 @@ static void envEnd(MemberEndForces& hi, MemberEndForces& lo, const MemberEndForc
     hi.Mz = std::max(hi.Mz, v.Mz); lo.Mz = std::min(lo.Mz, v.Mz);
 }
 
+static void envShell(ShellElementForces& hi, ShellElementForces& lo, const ShellElementForces& v) {
+    hi.Mxx = std::max(hi.Mxx, v.Mxx); lo.Mxx = std::min(lo.Mxx, v.Mxx);
+    hi.Myy = std::max(hi.Myy, v.Myy); lo.Myy = std::min(lo.Myy, v.Myy);
+    hi.Mxy = std::max(hi.Mxy, v.Mxy); lo.Mxy = std::min(lo.Mxy, v.Mxy);
+    hi.Qx  = std::max(hi.Qx,  v.Qx);  lo.Qx  = std::min(lo.Qx,  v.Qx);
+    hi.Qy  = std::max(hi.Qy,  v.Qy);  lo.Qy  = std::min(lo.Qy,  v.Qy);
+    hi.Nxx = std::max(hi.Nxx, v.Nxx); lo.Nxx = std::min(lo.Nxx, v.Nxx);
+    hi.Nyy = std::max(hi.Nyy, v.Nyy); lo.Nyy = std::min(lo.Nyy, v.Nyy);
+    hi.Nxy = std::max(hi.Nxy, v.Nxy); lo.Nxy = std::min(lo.Nxy, v.Nxy);
+}
+
 ResultEnvelope envelope(const std::vector<SolveResult>& cases) {
     ResultEnvelope E;
     if (cases.empty()) return E;
@@ -61,9 +72,13 @@ ResultEnvelope envelope(const std::vector<SolveResult>& cases) {
     E.reactMax = b.reactions; E.reactMin = b.reactions;
     E.endIMax.resize(b.memberForces.size()); E.endIMin.resize(b.memberForces.size());
     E.endJMax.resize(b.memberForces.size()); E.endJMin.resize(b.memberForces.size());
+    E.shellMax.resize(b.shellForces.size()); E.shellMin.resize(b.shellForces.size());
     for (size_t e = 0; e < b.memberForces.size(); ++e) {
         E.endIMax[e] = E.endIMin[e] = b.memberForces[e].endI;
         E.endJMax[e] = E.endJMin[e] = b.memberForces[e].endJ;
+    }
+    for (size_t s = 0; s < b.shellForces.size(); ++s) {
+        E.shellMax[s] = E.shellMin[s] = b.shellForces[s];
     }
     for (size_t c = 1; c < cases.size(); ++c) {
         const SolveResult& R = cases[c];
@@ -72,6 +87,9 @@ ResultEnvelope envelope(const std::vector<SolveResult>& cases) {
         for (size_t e = 0; e < E.endIMax.size() && e < R.memberForces.size(); ++e) {
             envEnd(E.endIMax[e], E.endIMin[e], R.memberForces[e].endI);
             envEnd(E.endJMax[e], E.endJMin[e], R.memberForces[e].endJ);
+        }
+        for (size_t s = 0; s < E.shellMax.size() && s < R.shellForces.size(); ++s) {
+            envShell(E.shellMax[s], E.shellMin[s], R.shellForces[s]);
         }
     }
     return E;

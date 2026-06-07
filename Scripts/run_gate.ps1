@@ -5,7 +5,10 @@
 # Prints a combined PASS/FAIL summary and sets the exit code (0 = all green).
 #
 # Usage:  powershell -ExecutionPolicy Bypass -File E:\project\ArchSim\Scripts\run_gate.ps1
-param([switch]$RequireOpenSees)   # CI: fail (not skip) when openseespy is absent
+param(
+    [switch]$RequireOpenSees,       # CI: fail (not skip) when openseespy is absent
+    [int]$ExpectedUeTests = 26       # guard against silently running only a subset
+)
 $ErrorActionPreference = 'Continue'
 
 $Root   = 'E:\project\ArchSim'
@@ -44,7 +47,7 @@ if (Test-Path $Log) {
             ForEach-Object { $_.Matches.Count } | Measure-Object -Sum).Sum
     if ($tot) { $Total = [int]$tot }
 }
-Write-Host ("       UE automation: {0} tests run, exit code {1} (process exit {2})" -f $Total, $UeExit, $UeRC)
+Write-Host ("       UE automation: {0} tests run, exit code {1} (process exit {2}; expected >= {3})" -f $Total, $UeExit, $UeRC, $ExpectedUeTests)
 
 # ---- [3/3] OpenSees offline cross-validation (#14; skipped if openseespy absent) ----
 Write-Host ''
@@ -67,11 +70,12 @@ if ($OsRC -eq 2) {
     else { Write-Host '       (OpenSees skipped: openseespy absent; pass -RequireOpenSees to enforce in CI)' -ForegroundColor Yellow }
 }
 $OsOk = if ($RequireOpenSees) { $OsRC -eq 0 } else { $OsRC -ne 1 }
-$GateOk = ($StandaloneRC -eq 0) -and ($UeExit -eq 0) -and ($Total -gt 0) -and $OsOk
+$UeCountOk = ($Total -ge $ExpectedUeTests)
+$GateOk = ($StandaloneRC -eq 0) -and ($UeExit -eq 0) -and $UeCountOk -and $OsOk
 if ($GateOk) {
     Write-Host (" GATE: PASS  (standalone OK, UE {0} tests green, OpenSees {1})" -f $Total, $OsState) -ForegroundColor Green
     exit 0
 } else {
-    Write-Host (" GATE: FAIL  (standalone exit {0}, UE exit {1}, {2} tests, OpenSees {3})" -f $StandaloneRC, $UeExit, $Total, $OsState) -ForegroundColor Red
+    Write-Host (" GATE: FAIL  (standalone exit {0}, UE exit {1}, {2}/{3} UE tests, OpenSees {4})" -f $StandaloneRC, $UeExit, $Total, $ExpectedUeTests, $OsState) -ForegroundColor Red
     exit 1
 }

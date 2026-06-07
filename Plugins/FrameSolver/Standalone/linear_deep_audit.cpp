@@ -1,0 +1,452 @@
+#include "FrameCore/BucklingAnalysis.h"
+#include "FrameCore/Combination.h"
+#include "FrameCore/FrameSolver.h"
+#include "FrameCore/InfluenceLine.h"
+#include "FrameCore/ModalAnalysis.h"
+#include "FrameCore/ModalDynamics.h"
+#include "FrameCore/ResponseSpectrum.h"
+#include "FrameCore/SelfWeight.h"
+#include "FrameTestFixtures.h"
+
+#include <algorithm>
+#include <array>
+#include <cmath>
+#include <iomanip>
+#include <iostream>
+#include <sstream>
+#include <string>
+#include <vector>
+
+using namespace frame;
+
+namespace {
+
+constexpr real kPi = 3.14159265358979323846;
+
+struct AuditRow {
+    std::string area;
+    std::string strengthened;
+    std::string oracle;
+    std::string metric;
+    real value = 0.0;
+    real tol = 0.0;
+    bool ok = false;
+};
+
+std::vector<AuditRow> g_rows;
+
+real relErr(real got, real expected) {
+    return std::fabs(got - expected) / std::max<real>(1.0, std::fabs(expected));
+}
+
+std::string sci(real v) {
+    std::ostringstream os;
+    os << std::scientific << std::setprecision(3) << v;
+    return os.str();
+}
+
+void addRow(const std::string& area, const std::string& strengthened,
+            const std::string& oracle, const std::string& metric,
+            real value, real tol, bool ok) {
+    g_rows.push_back(AuditRow{ area, strengthened, oracle, metric, value, tol, ok });
+}
+
+std::array<real, 6> endVals(const MemberEndForces& f) {
+    return { f.N, f.Vy, f.Vz, f.T, f.My, f.Mz };
+}
+
+std::array<real, 8> shellVals(const ShellElementForces& f) {
+    return { f.Mxx, f.Myy, f.Mxy, f.Qx, f.Qy, f.Nxx, f.Nyy, f.Nxy };
+}
+
+real maxDiff(const SolveResult& a, const SolveResult& b) {
+    real d = 0.0;
+    const size_t nu = std::min(a.u.size(), b.u.size());
+    const size_t nr = std::min(a.reactions.size(), b.reactions.size());
+    for (size_t i = 0; i < nu; ++i) d = std::max(d, std::fabs(a.u[i] - b.u[i]));
+    for (size_t i = 0; i < nr; ++i) d = std::max(d, std::fabs(a.reactions[i] - b.reactions[i]));
+    const size_t nm = std::min(a.memberForces.size(), b.memberForces.size());
+    for (size_t i = 0; i < nm; ++i) {
+        const auto ai = endVals(a.memberForces[i].endI);
+        const auto bi = endVals(b.memberForces[i].endI);
+        const auto aj = endVals(a.memberForces[i].endJ);
+        const auto bj = endVals(b.memberForces[i].endJ);
+        for (size_t k = 0; k < ai.size(); ++k) {
+            d = std::max(d, std::fabs(ai[k] - bi[k]));
+            d = std::max(d, std::fabs(aj[k] - bj[k]));
+        }
+    }
+    const size_t ns = std::min(a.shellForces.size(), b.shellForces.size());
+    for (size_t i = 0; i < ns; ++i) {
+        const auto av = shellVals(a.shellForces[i]);
+        const auto bv = shellVals(b.shellForces[i]);
+        for (size_t k = 0; k < av.size(); ++k) d = std::max(d, std::fabs(av[k] - bv[k]));
+    }
+    return d;
+}
+
+real maxAbs(const std::vector<real>& v) {
+    real m = 0.0;
+    for (real x : v) m = std::max(m, std::fabs(x));
+    return m;
+}
+
+real peakDof(const ModalTimeHistory& th, int gd) {
+    real p = 0.0;
+    for (const auto& u : th.u) {
+        if (gd >= 0 && static_cast<size_t>(gd) < u.size()) p = std::max(p, std::fabs(u[static_cast<size_t>(gd)]));
+    }
+    return p;
+}
+
+real sumOf(const std::vector<real>& v) {
+    real s = 0.0;
+    for (real x : v) s += x;
+    return s;
+}
+
+void buildPureBendingSS(FrameModel& m, int n, real L, real rho, const Section& sec) {
+    Material mat(210000.0, 80769.230769, rho);
+    fixtures::simplySupportedBeamN(m, n, L, mat, sec);
+    for (Node& nd : m.nodes) {
+        nd.fixed[Ux] = true;
+        nd.fixed[Uy] = true;
+        nd.fixed[Rx] = true;
+        nd.fixed[Rz] = true;
+    }
+}
+
+void testShellCombinationEnvelope() {
+    Material mat(30000.0, 11538.461538, 2500.0);
+    mat.nu = 0.30;
+    FrameModel m1, m2;
+    fixtures::squarePlateShell(m1, 2000.0, 120.0, 4, 0.0020, mat);
+    fixtures::squarePlateShell(m2, 2000.0, 120.0, 4, 0.0045, mat);
+    const SolveResult r1 = solve(m1);
+    const SolveResult r2 = solve(m2);
+    const bool shellOk = !r1.singular && !r2.singular && !r1.shellForces.empty() && r1.shellForces.size() == r2.shellForces.size();
+    addRow("Combination/envelope", "shell resultants included in post-processing",
+           "two MITC4 pressure cases solve and expose shellForces",
+           "shell case availability", shellOk ? 0.0 : 1.0, 0.0, shellOk);
+    if (!shellOk) return;
+
+    const SolveResult c = combine({ r1, r2 }, { 1.25, -0.40 });
+    real combErr = 0.0;
+    for (size_t s = 0; s < c.shellForces.size(); ++s) {
+        const auto cv = shellVals(c.shellForces[s]);
+        const auto a = shellVals(r1.shellForces[s]);
+        const auto b = shellVals(r2.shellForces[s]);
+        for (size_t k = 0; k < cv.size(); ++k) combErr = std::max(combErr, std::fabs(cv[k] - (1.25 * a[k] - 0.40 * b[k])));
+    }
+    addRow("Combination/envelope", "load combination now checks shell forces too",
+           "component arithmetic: 1.25*caseA - 0.40*caseB",
+           "max shell combine abs diff", combErr, 1e-9, combErr < 1e-9);
+
+    const ResultEnvelope e = envelope({ r1, r2 });
+    real envErr = (e.shellMax.size() == r1.shellForces.size() && e.shellMin.size() == r1.shellForces.size()) ? 0.0 : 1.0;
+    if (envErr == 0.0) {
+        for (size_t s = 0; s < r1.shellForces.size(); ++s) {
+            const auto hi = shellVals(e.shellMax[s]);
+            const auto lo = shellVals(e.shellMin[s]);
+            const auto a = shellVals(r1.shellForces[s]);
+            const auto b = shellVals(r2.shellForces[s]);
+            for (size_t k = 0; k < hi.size(); ++k) {
+                envErr = std::max(envErr, std::fabs(hi[k] - std::max(a[k], b[k])));
+                envErr = std::max(envErr, std::fabs(lo[k] - std::min(a[k], b[k])));
+            }
+        }
+    }
+    addRow("Combination/envelope", "envelope covers shell resultants, not beam-only",
+           "component max/min across two shell cases",
+           "max shell envelope abs diff", envErr, 1e-9, envErr < 1e-9);
+}
+
+void testSlopedSelfWeight() {
+    Material mat(200000.0, 76923.076923, 7850.0);
+    Section sec = Section::Rectangular(220.0, 360.0);
+    FrameModel m;
+    m.materials.push_back(mat);
+    m.sections.push_back(sec);
+    const Material* pm = &m.materials.back();
+    const Section* ps = &m.sections.back();
+    Node n0(0, 0.0, 0.0, 0.0); n0.fixAll();
+    Node n1(1, 3000.0, 0.0, 4000.0);
+    m.nodes = { n0, n1 };
+    m.members = { Member(0, 0, 1, pm, ps) };
+
+    const real g = 9810.0;
+    addSelfWeight(m, g);
+    const real L = norm(n1.pos - n0.pos);
+    const real wg = mat.rho * sec.A * g * 1.0e-12;
+    const real expectedW = wg * L;
+
+    real magErr = 1.0;
+    if (m.memberUDLs.size() == 1) {
+        const Vec3 w = m.memberUDLs[0].w_local;
+        magErr = relErr(norm(w), wg);
+    }
+    addRow("Self-weight", "sloped member gravity rotation",
+           "|R*w_global| must preserve distributed-load magnitude",
+           "relative magnitude error", magErr, 1e-12, magErr < 1e-12);
+
+    const SolveResult r = solve(m);
+    real rz = 0.0;
+    for (size_t i = Uz; i < r.reactions.size(); i += DOF_PER_NODE) rz += r.reactions[i];
+    const real rzErr = relErr(rz, expectedW);
+    addRow("Self-weight", "global equilibrium on an inclined cantilever",
+           "sum Rz equals rho*A*g*L after local-axis load conversion",
+           "relative vertical reaction error", rzErr, 1e-10, !r.singular && rzErr < 1e-10);
+}
+
+void testPreparedSystemReuse() {
+    Material mat(200000.0, 76923.076923, 7850.0);
+    Section sec = Section::Rectangular(250.0, 400.0);
+    FrameModel m;
+    fixtures::clampedSettlement(m, 6000.0, 1.0, mat, sec);
+    PreparedSystem ps = assembleAndFactor(m);
+
+    real worst = 0.0;
+    for (real delta : { 0.25, 1.0, 2.0, -0.75 }) {
+        m.nodes[2].prescribed[Uz] = -delta;
+        const SolveResult reuse = solveLoad(ps, m);
+        const SolveResult fresh = solve(m);
+        worst = std::max(worst, maxDiff(reuse, fresh));
+    }
+    addRow("Prepared solve", "same factorization, multiple settlement values",
+           "solveLoad(prepared) must match fresh solve for changed prescribed values",
+           "worst abs result diff", worst, 1e-10, worst < 1e-10);
+}
+
+void testInfluenceLine() {
+    Material mat(200000.0, 76923.076923, 7850.0);
+    Section sec = Section::Rectangular(180.0, 300.0);
+    const int n = 16;
+    const real L = 8000.0;
+    FrameModel m;
+    fixtures::simplySupportedBeamN(m, n, L, mat, sec);
+    PreparedSystem ps = assembleAndFactor(m);
+
+    NodalLoad saved; saved.node = 3; saved.comp[Uz] = -123.0;
+    m.nodalLoads = { saved };
+    std::vector<NodeId> ids;
+    for (int i = 0; i <= n; ++i) ids.push_back(i);
+    const std::vector<real> il = reactionInfluenceLine(ps, m, ids, 0, Uz);
+
+    real maxErr = 0.0;
+    for (int i = 0; i <= n && static_cast<size_t>(i) < il.size(); ++i) {
+        const real x = L * real(i) / real(n);
+        const real exact = (L - x) / L;
+        maxErr = std::max(maxErr, std::fabs(il[static_cast<size_t>(i)] - exact));
+    }
+    addRow("Influence line", "16-position moving unit load, not one midpoint",
+           "Muller-Breslau/static equilibrium: R_A=(L-x)/L",
+           "max ordinate abs error", maxErr, 1e-11, maxErr < 1e-11);
+
+    const bool restored = m.nodalLoads.size() == 1 && m.nodalLoads[0].node == saved.node &&
+                          std::fabs(m.nodalLoads[0].comp[Uz] - saved.comp[Uz]) < 1e-15;
+    addRow("Influence line", "API mutation guard",
+           "caller nodalLoads restored after marching load",
+           "restoration flag", restored ? 0.0 : 1.0, 0.0, restored);
+}
+
+void testModalScaling() {
+    Section sec = Section::Rectangular(120.0, 240.0);
+    FrameModel m;
+    buildPureBendingSS(m, 32, 6000.0, 7850.0, sec);
+    PreparedSystem ps = assembleAndFactor(m);
+    ModalResult mr = solveModal(ps, ModalOptions{ 6 });
+    const bool modalOk = !mr.singular && mr.modes.size() >= 3;
+    addRow("Modal", "pure vertical-bending modal family",
+           "model must return at least first 3 bending modes",
+           "modal availability", modalOk ? 0.0 : 1.0, 0.0, modalOk);
+    if (!modalOk) return;
+
+    const real r2 = mr.modes[1].omega / mr.modes[0].omega;
+    const real r3 = mr.modes[2].omega / mr.modes[0].omega;
+    const real ratioErr = std::max(relErr(r2, 4.0), relErr(r3, 9.0));
+    addRow("Modal", "higher-mode ratios",
+           "simply-supported beam omega_n/omega_1 = n^2",
+           "max relative ratio error", ratioErr, 5e-3, ratioErr < 5e-3);
+
+    FrameModel mdense;
+    buildPureBendingSS(mdense, 32, 6000.0, 7850.0 * 4.0, sec);
+    const ModalResult mrd = solveModal(assembleAndFactor(mdense), ModalOptions{ 1 });
+    const real densityErr = (!mrd.singular && !mrd.modes.empty()) ? relErr(mr.modes[0].omega / mrd.modes[0].omega, 2.0) : 1.0;
+    addRow("Modal", "density scaling",
+           "rho x4 should make omega_1 half",
+           "relative scaling error", densityErr, 1e-10, densityErr < 1e-10);
+
+    FrameModel mlong;
+    buildPureBendingSS(mlong, 32, 12000.0, 7850.0, sec);
+    const ModalResult mrl = solveModal(assembleAndFactor(mlong), ModalOptions{ 1 });
+    const real lengthErr = (!mrl.singular && !mrl.modes.empty()) ? relErr(mr.modes[0].omega / mrl.modes[0].omega, 4.0) : 1.0;
+    addRow("Modal", "length scaling",
+           "L x2 should make Euler-Bernoulli omega_1 quarter",
+           "relative scaling error", lengthErr, 1e-10, lengthErr < 1e-10);
+}
+
+real bucklingPcr(real L, real pref, bool compression, bool& ok) {
+    Material mat(210000.0, 80769.230769, 7850.0);
+    Section sec = Section::Rectangular(160.0, 160.0);
+    const int n = 20;
+    FrameModel m;
+    fixtures::simplySupportedBeamN(m, n, L, mat, sec);
+    NodalLoad nl;
+    nl.node = n;
+    nl.comp[Ux] = compression ? -pref : pref;
+    m.nodalLoads = { nl };
+    PreparedSystem ps = assembleAndFactor(m);
+    const BucklingResult br = solveBuckling(ps, m);
+    ok = !br.singular;
+    return ok ? br.criticalFactor * pref : 0.0;
+}
+
+void testBucklingScaling() {
+    Material mat(210000.0, 80769.230769, 7850.0);
+    Section sec = Section::Rectangular(160.0, 160.0);
+    bool ok1 = false, ok2 = false, ok3 = false;
+    const real L = 5000.0;
+    const real p1 = bucklingPcr(L, 1000.0, true, ok1);
+    const real p2 = bucklingPcr(L, 2000.0, true, ok2);
+    const real pLong = bucklingPcr(2.0 * L, 1000.0, true, ok3);
+    const real euler = kPi * kPi * mat.E * sec.Iz / (L * L);
+
+    const real eulerErr = ok1 ? relErr(p1, euler) : 1.0;
+    addRow("Buckling", "Euler oracle at a new length",
+           "Pcr = pi^2 E I / L^2, pinned-pinned",
+           "relative Pcr error", eulerErr, 1.5e-3, ok1 && eulerErr < 1.5e-3);
+
+    const real loadScaleErr = (ok1 && ok2) ? relErr(p1 / p2, 1.0) : 1.0;
+    addRow("Buckling", "reference load scaling",
+           "lambda*Pref must be invariant when Pref changes",
+           "relative Pcr scale error", loadScaleErr, 1e-10, loadScaleErr < 1e-10);
+
+    const real lengthErr = (ok1 && ok3) ? relErr(p1 / pLong, 4.0) : 1.0;
+    addRow("Buckling", "length scaling",
+           "Pcr(L) / Pcr(2L) = 4",
+           "relative length-scale error", lengthErr, 2e-3, lengthErr < 2e-3);
+
+    bool tensionOk = false;
+    (void)bucklingPcr(L, 1000.0, false, tensionOk);
+    addRow("Buckling", "no-compression guard",
+           "tension-only reference load should not return a positive buckling factor",
+           "unexpected non-singular flag", tensionOk ? 1.0 : 0.0, 0.0, !tensionOk);
+}
+
+void testResponseSpectrum() {
+    Material mat(210000.0, 80769.230769, 7850.0);
+    Section sec = Section::Rectangular(90.0, 150.0);
+    FrameModel m;
+    fixtures::cantileverBeamN(m, 16, 4000.0, mat, sec);
+    PreparedSystem ps = assembleAndFactor(m);
+    const ModalResult mr4 = solveModal(ps, ModalOptions{ 4 });
+    const ModalResult mr20 = solveModal(ps, ModalOptions{ 20 });
+    Spectrum sp1; sp1.T = { 0.0, 10.0 }; sp1.Sa = { 9810.0, 9810.0 };
+    Spectrum sp2; sp2.T = { 0.0, 10.0 }; sp2.Sa = { 19620.0, 19620.0 };
+
+    const ResponseSpectrumResult r4 = solveResponseSpectrum(ps, mr4, sp1, Uz, SpectrumCombo::SRSS, 0.05);
+    const ResponseSpectrumResult r20 = solveResponseSpectrum(ps, mr20, sp1, Uz, SpectrumCombo::SRSS, 0.05);
+    const ResponseSpectrumResult r20x2 = solveResponseSpectrum(ps, mr20, sp2, Uz, SpectrumCombo::SRSS, 0.05);
+
+    const real s4 = sumOf(r4.effMass);
+    const real s20 = sumOf(r20.effMass);
+    const bool massOk = !r4.singular && !r20.singular && s20 + 1e-8 >= s4 && s20 <= r20.totalMass * (1.0 + 1e-8);
+    const real massMetric = (r20.totalMass > 0.0) ? s20 / r20.totalMass : 0.0;
+    addRow("Response spectrum", "mode truncation and mass bound",
+           "participating mass is monotone with more modes and <= total mass",
+           "20-mode participating mass ratio", massMetric, 1.0, massOk);
+
+    const real shearScaleErr = (!r20.singular && !r20x2.singular && r20.baseShear > 0.0)
+        ? relErr(r20x2.baseShear / r20.baseShear, 2.0) : 1.0;
+    const real dispScaleErr = (!r20.singular && !r20x2.singular && maxAbs(r20.u) > 0.0)
+        ? relErr(maxAbs(r20x2.u) / maxAbs(r20.u), 2.0) : 1.0;
+    const real scaleErr = std::max(shearScaleErr, dispScaleErr);
+    addRow("Response spectrum", "Sa amplitude scaling",
+           "doubling spectrum Sa doubles SRSS base shear and displacement",
+           "max relative scaling error", scaleErr, 1e-12, scaleErr < 1e-12);
+
+    Spectrum interp; interp.T = { 0.0, 1.0, 3.0 }; interp.Sa = { 10.0, 20.0, 60.0 };
+    const real interpErr = std::fabs(interp.at(2.0) - 40.0);
+    addRow("Response spectrum", "spectrum interpolation",
+           "piecewise-linear Sa(T) at T=2.0 between 1.0 and 3.0",
+           "absolute interpolation error", interpErr, 1e-14, interpErr < 1e-14);
+}
+
+void testModalDynamics() {
+    Material mat(210000.0, 80769.230769, 7850.0);
+    Section sec = Section::Rectangular(120.0, 240.0);
+    const int n = 12;
+    FrameModel m;
+    fixtures::cantileverBeamN(m, n, 3500.0, mat, sec);
+    NodalLoad nl; nl.node = n; nl.comp[Uz] = -1000.0; m.nodalLoads = { nl };
+    PreparedSystem ps = assembleAndFactor(m);
+    const ModalResult mr = solveModal(ps, ModalOptions{ 20 });
+    const bool modalOk = !mr.singular && !mr.modes.empty();
+    if (!modalOk) {
+        addRow("Modal dynamics", "setup", "modal basis must be available", "setup flag", 1.0, 0.0, false);
+        return;
+    }
+
+    const real T1 = 2.0 * kPi / mr.modes[0].omega;
+    ModalDynamicsOptions opt; opt.zeta = 0.02; opt.dt = T1 / 250.0; opt.nSteps = 500;
+    const ModalTimeHistory th1 = solveModalStepResponse(ps, m, mr, opt);
+    FrameModel m2 = m;
+    m2.nodalLoads[0].comp[Uz] = -2000.0;
+    const ModalTimeHistory th2 = solveModalStepResponse(ps, m2, mr, opt);
+    const int tipUz = gdof(n, Uz);
+    const real p1 = peakDof(th1, tipUz);
+    const real p2 = peakDof(th2, tipUz);
+    const real loadScaleErr = (p1 > 0.0 && p2 > 0.0) ? relErr(p2 / p1, 2.0) : 1.0;
+    addRow("Modal dynamics", "load scaling",
+           "linear modal Newmark response doubles under doubled step load",
+           "relative peak scaling error", loadScaleErr, 1e-12, loadScaleErr < 1e-12);
+
+    ModalDynamicsOptions und = opt; und.zeta = 0.0;
+    ModalDynamicsOptions damp = opt; damp.zeta = 0.25;
+    const ModalTimeHistory thu = solveModalStepResponse(ps, m, mr, und);
+    const ModalTimeHistory thd = solveModalStepResponse(ps, m, mr, damp);
+    const real peakUnd = peakDof(thu, tipUz);
+    const real peakDamp = peakDof(thd, tipUz);
+    const bool dampingOk = peakDamp < peakUnd;
+    addRow("Modal dynamics", "damping effect",
+           "higher damping must reduce step-response peak over the same window",
+           "peak damped / peak undamped", peakUnd > 0.0 ? peakDamp / peakUnd : 1.0, 1.0, dampingOk);
+
+    ModalDynamicsOptions bad; bad.dt = 0.0; bad.nSteps = 10;
+    const ModalTimeHistory badTh = solveModalStepResponse(ps, m, mr, bad);
+    addRow("Modal dynamics", "invalid input guard",
+           "dt <= 0 must return singular/bad modal-step input",
+           "unexpected non-singular flag", badTh.singular ? 0.0 : 1.0, 0.0, badTh.singular);
+}
+
+}  // namespace
+
+int main() {
+    testShellCombinationEnvelope();
+    testSlopedSelfWeight();
+    testPreparedSystemReuse();
+    testInfluenceLine();
+    testModalScaling();
+    testBucklingScaling();
+    testResponseSpectrum();
+    testModalDynamics();
+
+    int failures = 0;
+    std::cout << "Linear-analysis deep audit (post F17-F25 strengthening)\n\n";
+    std::cout << "| Major area | Strengthened coverage | Independent oracle / invariant | Metric | Result | Tol | Status |\n";
+    std::cout << "|---|---|---|---|---:|---:|---|\n";
+    for (const AuditRow& r : g_rows) {
+        if (!r.ok) ++failures;
+        std::cout << "| " << r.area
+                  << " | " << r.strengthened
+                  << " | " << r.oracle
+                  << " | " << r.metric
+                  << " | " << sci(r.value)
+                  << " | " << sci(r.tol)
+                  << " | " << (r.ok ? "PASS" : "FAIL") << " |\n";
+    }
+    std::cout << "\n" << (failures == 0 ? "PASS" : "FAIL")
+              << " failures=" << failures
+              << " checks=" << g_rows.size() << "\n";
+    return failures == 0 ? 0 : 1;
+}

@@ -83,6 +83,7 @@ void BeamColumnElement::assembleMass(std::vector<Triplet>& trips) const {
 
 void BeamColumnElement::assembleGeometric(std::vector<Triplet>& trips, const std::vector<real>& memberAxial) const {
     const real N = (e_ >= 0 && e_ < static_cast<int>(memberAxial.size())) ? memberAxial[e_] : 0.0; // compression +
+    if (N <= 0.0) return;                                  // tension is stabilizing; not a buckling source
     const Mat12 kgL = localGeometric12(-N, L_);           // tension-positive P = -N
     const Mat12 kgG = T_.transpose() * kgL * T_;
     for (int a = 0; a < 12; ++a)
