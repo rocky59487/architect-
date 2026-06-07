@@ -206,7 +206,7 @@ bool FFrameCoreModalBeamTest::RunTest(const FString&)
 		TestFalse(TEXT("SS modal non-singular"), mr.singular);
 		TestTrue(TEXT("has modes"), mr.modes.size() >= 1);
 		const double w1ex = kPi * kPi / (L * L) * FMath::Sqrt(E * sec.Iz / (rhoC * sec.A));
-		TestTrue(TEXT("SS omega1 within 1%"), FMath::Abs(mr.modes[0].omega - w1ex) < 0.01 * w1ex);
+		TestTrue(TEXT("SS omega1 within 0.1%"), FMath::Abs(mr.modes[0].omega - w1ex) < 1e-3 * w1ex);
 	}
 	{   // cantilever fundamental omega1 = 1.875^2 sqrt(EI/rhoAL^4)
 		const int n = 12; const double L = 3000.0;
@@ -215,7 +215,7 @@ bool FFrameCoreModalBeamTest::RunTest(const FString&)
 		const ModalResult mr = solveModal(ps, ModalOptions{});
 		const double b1 = 1.8751040687;
 		const double w1ex = b1 * b1 * FMath::Sqrt(E * sec.Iz / (rhoC * sec.A * L * L * L * L));
-		TestTrue(TEXT("cantilever omega1 within 1%"), FMath::Abs(mr.modes[0].omega - w1ex) < 0.01 * w1ex);
+		TestTrue(TEXT("cantilever omega1 within 0.1%"), FMath::Abs(mr.modes[0].omega - w1ex) < 1e-3 * w1ex);
 	}
 	return true;
 }
@@ -239,7 +239,7 @@ bool FFrameCoreBucklingColumnTest::RunTest(const FString&)
 		const BucklingResult br = solveBuckling(ps, m);
 		TestFalse(TEXT("pinned-pinned buckling non-singular"), br.singular);
 		const double PcrEx = kPi * kPi * E * sec.Iz / (L * L);
-		TestTrue(TEXT("Euler Pcr = pi^2 EI/L^2"), FMath::Abs(br.criticalFactor * Pref - PcrEx) < 0.01 * PcrEx);
+		TestTrue(TEXT("Euler Pcr = pi^2 EI/L^2"), FMath::Abs(br.criticalFactor * Pref - PcrEx) < 1e-3 * PcrEx);
 	}
 	{   // fixed-free: Pcr = pi^2 EI / (2L)^2
 		const int n = 10; const double L = 3000.0;
@@ -248,7 +248,7 @@ bool FFrameCoreBucklingColumnTest::RunTest(const FString&)
 		PreparedSystem ps = assembleAndFactor(m);
 		const BucklingResult br = solveBuckling(ps, m);
 		const double PcrEx = kPi * kPi * E * sec.Iz / (4.0 * L * L);
-		TestTrue(TEXT("Euler Pcr = pi^2 EI/(2L)^2"), FMath::Abs(br.criticalFactor * Pref - PcrEx) < 0.01 * PcrEx);
+		TestTrue(TEXT("Euler Pcr = pi^2 EI/(2L)^2"), FMath::Abs(br.criticalFactor * Pref - PcrEx) < 1e-3 * PcrEx);
 	}
 	return true;
 }

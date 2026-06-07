@@ -750,7 +750,7 @@ int main() {
             const real w1ex = kPi * kPi / (L * L) * std::sqrt(E * sec.Iz / (rhoC * sec.A));
             std::printf("   SS beam: omega1=%.6g rad/s (exact %.6g; f1=%.4f Hz)\n",
                         mr.modes[0].omega, w1ex, mr.modes[0].freqHz);
-            checkClose("SS fundamental omega1 = (pi/L)^2 sqrt(EI/rhoA)", mr.modes[0].omega, w1ex, 0.01);
+            checkClose("SS fundamental omega1 = (pi/L)^2 sqrt(EI/rhoA)", mr.modes[0].omega, w1ex, 1e-3);
             checkTrue("modes ascending", mr.modes[1].omega >= mr.modes[0].omega * 0.999, "");
         }
         // (b) cantilever, fundamental omega1 = 1.875^2 sqrt(EI/(rho A L^4)).
@@ -764,7 +764,7 @@ int main() {
             const real w1ex = beta1 * beta1 * std::sqrt(E * sec.Iz / (rhoC * sec.A * L * L * L * L));
             std::printf("   cantilever: omega1=%.6g (exact %.6g; f1=%.4f Hz)\n",
                         mr.modes[0].omega, w1ex, mr.modes[0].freqHz);
-            checkClose("cantilever fundamental omega1 = 1.875^2 sqrt(EI/rhoAL^4)", mr.modes[0].omega, w1ex, 0.01);
+            checkClose("cantilever fundamental omega1 = 1.875^2 sqrt(EI/rhoAL^4)", mr.modes[0].omega, w1ex, 1e-3);
         }
     }
 
@@ -784,7 +784,7 @@ int main() {
             const real Pcr = br.criticalFactor * Pref;
             const real PcrEx = kPi * kPi * E * sec.Iz / (L * L);
             std::printf("   pinned-pinned: Pcr=%.6g (Euler %.6g, factor=%.4g)\n", Pcr, PcrEx, br.criticalFactor);
-            checkClose("Euler Pcr = pi^2 EI/L^2", Pcr, PcrEx, 0.01);
+            checkClose("Euler Pcr = pi^2 EI/L^2", Pcr, PcrEx, 1e-3);
         }
         // (b) fixed-free (cantilever) column: Pcr = pi^2 EI / (2L)^2.
         {
@@ -797,7 +797,7 @@ int main() {
             const real Pcr = br.criticalFactor * Pref;
             const real PcrEx = kPi * kPi * E * sec.Iz / (4.0 * L * L);
             std::printf("   fixed-free: Pcr=%.6g (Euler %.6g, factor=%.4g)\n", Pcr, PcrEx, br.criticalFactor);
-            checkClose("Euler Pcr = pi^2 EI/(2L)^2", Pcr, PcrEx, 0.01);
+            checkClose("Euler Pcr = pi^2 EI/(2L)^2", Pcr, PcrEx, 1e-3);
         }
     }
 

@@ -161,8 +161,8 @@ The analysis modules (each a free function + POD result, **no `solve()` flag blo
 | Transient | `solveModalStepResponse` (`ModalDynamics.h`) | Newmark-β per modal coordinate |
 
 Units for mass/self-weight: the engine is consistent **N-mm-tonne-s**, so `Material.rho` (kg/m³)
-is bridged by `×1e-12` (→ tonne/mm³). All seven oracles validate this conversion implicitly
-(`wL²/8`, `ωₙ=(nπ/L)²√(EI/ρA)`, …).
+is bridged by `×1e-12` (→ tonne/mm³). The self-weight and modal oracles validate this conversion
+implicitly — it only matches `wL²/8` (F18) and `ωₙ=(nπ/L)²√(EI/ρA)` (F22) when the factor is right.
 
 ## 5. Strength screen (`ISectionStrength` → `ElasticAllowable`)
 
@@ -212,16 +212,19 @@ plates/shells directly and converges to the exact solution.
   circular arch; shells: square/clamped plate, plate & membrane patch, Scordelis-Lo roof, pinched
   cylinder, rigid model rotation). Shared by both the standalone gate and the UE automation tests,
   so a green standalone run exercises the *same* solver path UE compiles.
-- **`Standalone/main.cpp`** — F1…F16 fixtures vs closed-form oracles, benchmark references, and
+- **`Standalone/main.cpp`** — F1…F25 fixtures vs closed-form oracles, benchmark references, and
   patch tests (see README §validation), printing `[PASS]/[FAIL]` and `ALL PASS (failures=n)`.
-  F13–F16 cover the MITC4 shell (plate bending, membrane+drilling, Scordelis-Lo, pinched cylinder).
+  F13–F16 cover the MITC4 shell; F17–F25 cover the linear-analysis suite (superposition + self-
+  weight, factorize-once + settlement, pattern envelope, influence lines, modal, buckling,
+  response spectrum, transient).
 - **`Standalone/frame_cli.cpp`** — a stdin/stdout solver driver used by the Python validation
-  tools (parses a model incl. `SMAT/SHELL/SPRESS`, solves, prints displacements + member/shell
-  forces).
-- **`Private/Tests/*.cpp`** — UE automation mirrors (`FrameCore.*`), **16** tests (incl. four
-  `FrameCore.Shell.*`), same oracles.
-- **`Tools/`** — `opensees_compare.py` (OpenSees cross-validation: beams strict 1e-8; the MITC4
-  shell vs OpenSees' own `ShellMITC4` to ~1e-10; `--relaxed` for cross-platform drift),
+  tools (parses a model incl. `SMAT/SHELL/SPRESS` + node `prescribed` + `EIGEN`, solves, prints
+  displacements + member/shell forces + `FREQ`).
+- **`Private/Tests/*.cpp`** — UE automation mirrors (`FrameCore.*`), **26** tests (4 `Shell.*`,
+  the load/solver/modal/buckling/response-spectrum/dynamics suite), same oracles.
+- **`Tools/`** — `opensees_compare.py` (OpenSees cross-validation: beams strict 1e-8; prescribed
+  settlement vs `sp()` to 0; the MITC4 shell vs OpenSees' own `ShellMITC4` to ~1e-10; natural
+  frequencies vs `eigen -cMass` to ~1e-11; `--relaxed` for cross-platform drift),
   `independent_precision_audit.py`, `complex_structure_benchmark.py`, `grillage_curve_audit.py`
   — all black-box the engine through `frame_cli.exe`.
 - **`Scripts/run_gate.ps1`** — runs all three legs and prints a combined verdict + exit code
