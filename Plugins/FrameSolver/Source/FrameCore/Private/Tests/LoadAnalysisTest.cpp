@@ -6,6 +6,7 @@
 #include "FrameCore/FrameSolver.h"
 #include "FrameCore/SelfWeight.h"
 #include "FrameCore/Combination.h"
+#include "FrameCore/InfluenceLine.h"
 #include "FrameCore/Material.h"
 #include "FrameCore/Section.h"
 #include "FrameTestFixtures.h"
@@ -149,6 +150,35 @@ bool FFrameCoreLoadPatternEnvelopeTest::RunTest(const FString&)
 	TestTrue(TEXT("envelope worst support moment = wL^2/8"), FMath::Abs(MBworst - w * L * L / 8.0) < 1e-4 * w * L * L / 8.0);
 	TestTrue(TEXT("single-span pattern bends its span more than full load"),
 		Mres(rL.memberForces[0].endJ) > Mres(rAll.memberForces[0].endJ) * 1.05);
+	return true;
+}
+
+// ---- F21 mirror: influence line + Muller-Breslau cross-check ----
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FFrameCoreLoadInfluenceLineTest,
+	"FrameCore.Load.InfluenceLine",
+	EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::SmokeFilter)
+bool FFrameCoreLoadInfluenceLineTest::RunTest(const FString&)
+{
+	using namespace frame;
+	Section sec = Section::Rectangular(100.0, 100.0);
+	Material mat(210000.0, 80769.0, 7850.0);
+	const int n = 8; const double L = 4000.0;
+	FrameModel m; fixtures::simplySupportedBeamN(m, n, L, mat, sec);
+	PreparedSystem ps = assembleAndFactor(m);
+	std::vector<NodeId> loadNodes; for (int i = 0; i <= n; ++i) loadNodes.push_back(i);
+
+	const std::vector<double> ilR = reactionInfluenceLine(ps, m, loadNodes, 0, Uz);
+	m.nodalLoads.clear(); m.nodes[0].prescribed[Uz] = 1.0;
+	const SolveResult rMB = solveLoad(ps, m);
+	m.nodes[0].prescribed[Uz] = 0.0;
+	double eAna = 0, eMB = 0;
+	for (int i = 0; i <= n; ++i) {
+		const double x = L * i / n, exact = (L - x) / L;
+		eAna = FMath::Max(eAna, FMath::Abs(ilR[i] - exact));
+		eMB  = FMath::Max(eMB, FMath::Abs(ilR[i] - rMB.disp(i, Uz)));
+	}
+	TestTrue(TEXT("reaction IL == (L-x)/L"), eAna < 1e-9);
+	TestTrue(TEXT("reaction IL == Muller-Breslau deflected shape"), eMB < 1e-9);
 	return true;
 }
 

@@ -5,6 +5,7 @@
 #include "FrameCore/Grillage.h"
 #include "FrameCore/SelfWeight.h"
 #include "FrameCore/Combination.h"
+#include "FrameCore/InfluenceLine.h"
 #include "FrameTestFixtures.h"
 
 #include <vector>
@@ -686,6 +687,47 @@ int main() {
         // envelope displacement plumbing: uMin equals the per-case minimum at the loaded midspan.
         const real uminCase = std::min({ rL.disp(1, Uz), rR.disp(1, Uz), rAll.disp(1, Uz) });
         checkClose("envelope uMin matches per-case min", env.uMin[gdof(1, Uz)], uminCase, 1e-12);
+    }
+
+    // ---------- F21: influence lines / moving load (same-K-many-RHS) ----------
+    {
+        std::printf("[F21] influence lines (factorize-once, unit load marched)\n");
+        const int n = 8; const real L = 4000.0;
+        FrameModel m; fixtures::simplySupportedBeamN(m, n, L, mat, sec);
+        PreparedSystem ps = assembleAndFactor(m);
+        std::vector<NodeId> loadNodes; for (int i = 0; i <= n; ++i) loadNodes.push_back(i);
+
+        // (a) reaction R_A influence line == (L-x)/L, cross-checked by Müller-Breslau
+        //     (unit settlement at A, no load -> the deflected shape IS the reaction IL).
+        const std::vector<real> ilR = reactionInfluenceLine(ps, m, loadNodes, 0, Uz);
+        m.nodalLoads.clear(); m.nodes[0].prescribed[Uz] = 1.0;
+        const SolveResult rMB = solveLoad(ps, m);
+        m.nodes[0].prescribed[Uz] = 0.0;
+        real eAna = 0, eMB = 0;
+        for (int i = 0; i <= n; ++i) {
+            const real x = L * i / n, exact = (L - x) / L;
+            eAna = std::max(eAna, std::fabs(ilR[i] - exact));
+            eMB  = std::max(eMB, std::fabs(ilR[i] - rMB.disp(i, Uz)));
+        }
+        checkTrue("reaction IL == (L-x)/L", eAna < 1e-9, "e=" + std::to_string(eAna));
+        checkTrue("reaction IL == Muller-Breslau deflected shape", eMB < 1e-9, "e=" + std::to_string(eMB));
+
+        // (b) midspan bending-moment influence line = triangle, peak ab/L = L/4 at midspan.
+        const int c = n / 2; real eShape = 0;
+        const real peak = L / 4.0;
+        for (int i = 0; i <= n; ++i) {
+            m.nodalLoads.clear();
+            NodalLoad nl; nl.node = i; nl.comp[Uz] = -1.0; m.nodalLoads.push_back(nl);
+            const SolveResult r = solveLoad(ps, m);
+            const auto& mf = r.memberForces[c - 1].endJ;        // moment at midspan node
+            const real Mc = std::sqrt(mf.My * mf.My + mf.Mz * mf.Mz);
+            const real x = L * i / n, exact = (x <= L / 2) ? x / 2.0 : (L - x) / 2.0;
+            eShape = std::max(eShape, std::fabs(Mc - exact));
+        }
+        m.nodalLoads.clear();
+        std::printf("   reaction IL err=%.2e (analytic) / %.2e (Muller-Breslau);  moment IL err=%.2e (peak ab/L=%.0f)\n",
+                    eAna, eMB, eShape, peak);
+        checkTrue("midspan moment IL == triangle (peak ab/L)", eShape < 1e-6 * peak, "e=" + std::to_string(eShape));
     }
 
     std::printf("\n%s  (failures=%d)\n", g_fail == 0 ? "ALL PASS" : "FAILURES", g_fail);
