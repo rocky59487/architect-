@@ -134,6 +134,26 @@ inline void circularArchCantilever(FrameModel& m, real R, int nSeg, real P,
     m.nodalLoads = { nl };
 }
 
+// Bare geometry (NO loads) for self-weight tests — the caller applies addSelfWeight().
+// cantileverBare: horizontal cantilever along +X, encastre at origin.
+inline void cantileverBare(FrameModel& m, real L, const Material& mat, const Section& sec) {
+    const Material* pm; const Section* ps; prepMatSec(m, mat, sec, pm, ps);
+    Node n0(0, 0, 0, 0); n0.fixAll();
+    Node n1(1, L, 0, 0);
+    m.nodes   = { n0, n1 };
+    m.members = { Member(0, 0, 1, pm, ps) };
+}
+
+// simplySupportedBare: pin at x=0 (Ux,Uy,Uz,Rx), roller at x=L (Uy,Uz), midspan node.
+inline void simplySupportedBare(FrameModel& m, real L, const Material& mat, const Section& sec) {
+    const Material* pm; const Section* ps; prepMatSec(m, mat, sec, pm, ps);
+    Node n0(0, 0,     0, 0); n0.fixed[Ux] = n0.fixed[Uy] = n0.fixed[Uz] = n0.fixed[Rx] = true;
+    Node n1(1, L / 2, 0, 0);
+    Node n2(2, L,     0, 0); n2.fixed[Uy] = n2.fixed[Uz] = true;
+    m.nodes   = { n0, n1, n2 };
+    m.members = { Member(0, 0, 1, pm, ps), Member(1, 1, 2, pm, ps) };
+}
+
 // ---------------------------------------------------------------------------
 // Shell (MITC4) fixtures. Geometry in the global X-Y plane (facet normal +Z), so
 // at milestone 2 (plate bending only) the in-plane DOFs (Ux,Uy,Rz) are restrained

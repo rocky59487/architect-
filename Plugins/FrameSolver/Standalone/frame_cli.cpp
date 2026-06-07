@@ -19,7 +19,8 @@
 // MAT and SMAT append to ONE material pool in input order; matIdx indexes that pool.
 // OUTPUT:
 //   SINGULAR <0|1>
-//   DISP id ux uy uz rx ry rz                         (one per node, node order)
+//   DISP nodeId ux uy uz rx ry rz                     (one per node, node order)
+//   RF   nodeId Fx Fy Fz Mx My Mz                     (one per node, node order)
 //   MF   id Ni Vyi Vzi Ti Myi Mzi Nj Vyj Vzj Tj Myj Mzj   (one per member)
 //   SF   id Mxx Myy Mxy Qx Qy Nxx Nyy Nxy                  (one per shell)
 #include "FrameCore/FrameSolver.h"
@@ -102,19 +103,22 @@ int main() {
 
     std::printf("SINGULAR %d\n", r.singular ? 1 : 0);
     for (size_t k = 0; k < model.nodes.size(); ++k) {
-        std::printf("DISP %d %.12g %.12g %.12g %.12g %.12g %.12g\n", (int)k,
+        std::printf("DISP %d %.12g %.12g %.12g %.12g %.12g %.12g\n", model.nodes[k].id,
                     r.disp((int)k,Ux), r.disp((int)k,Uy), r.disp((int)k,Uz),
                     r.disp((int)k,Rx), r.disp((int)k,Ry), r.disp((int)k,Rz));
+        std::printf("RF %d %.12g %.12g %.12g %.12g %.12g %.12g\n", model.nodes[k].id,
+                    r.reaction((int)k,Ux), r.reaction((int)k,Uy), r.reaction((int)k,Uz),
+                    r.reaction((int)k,Rx), r.reaction((int)k,Ry), r.reaction((int)k,Rz));
     }
     for (size_t e = 0; e < r.memberForces.size(); ++e) {
         const MemberForcePair& mf = r.memberForces[e];
-        std::printf("MF %d %.12g %.12g %.12g %.12g %.12g %.12g %.12g %.12g %.12g %.12g %.12g %.12g\n", (int)e,
+        std::printf("MF %d %.12g %.12g %.12g %.12g %.12g %.12g %.12g %.12g %.12g %.12g %.12g %.12g\n", mf.member,
                     mf.endI.N, mf.endI.Vy, mf.endI.Vz, mf.endI.T, mf.endI.My, mf.endI.Mz,
                     mf.endJ.N, mf.endJ.Vy, mf.endJ.Vz, mf.endJ.T, mf.endJ.My, mf.endJ.Mz);
     }
     for (size_t e = 0; e < r.shellForces.size(); ++e) {
         const ShellElementForces& sf = r.shellForces[e];
-        std::printf("SF %d %.12g %.12g %.12g %.12g %.12g %.12g %.12g %.12g\n", (int)e,
+        std::printf("SF %d %.12g %.12g %.12g %.12g %.12g %.12g %.12g %.12g\n", sf.shell,
                     sf.Mxx, sf.Myy, sf.Mxy, sf.Qx, sf.Qy, sf.Nxx, sf.Nyy, sf.Nxy);
     }
     return 0;

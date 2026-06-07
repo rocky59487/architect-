@@ -32,7 +32,9 @@ struct Material {
                           // constitutive (Dm, Db). Beams use E,G directly and ignore
                           // nu, so this defaults to 0 and leaves existing fixtures
                           // (which never set it) byte-for-byte unchanged.
-    real     rho = 0;     // density (kg/m^3) — informational this milestone
+    real     rho = 0;     // density (kg/m^3). Used by self-weight (addSelfWeight) and the
+                          // mass matrix; both apply the unit bridge rho[tonne/mm^3] =
+                          // rho[kg/m^3]*1e-12 to stay in the engine's N-mm-tonne-s system.
     Capacity cap;
 
     Material() = default;

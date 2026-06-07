@@ -3,6 +3,8 @@
 #include "FrameCore/FrameSolver.h"
 #include "FrameCore/ElasticAllowable.h"
 #include "FrameCore/Grillage.h"
+#include "FrameCore/SelfWeight.h"
+#include "FrameCore/Combination.h"
 #include "FrameTestFixtures.h"
 
 #include <vector>
@@ -534,6 +536,84 @@ int main() {
                   "ratio=" + std::to_string(w32 / ref));
         checkTrue("cylinder N=32 not over-stiff/over-soft (<= 105%)", w32 <= 1.05 * ref,
                   "ratio=" + std::to_string(w32 / ref));
+    }
+
+    // ---------- F17: superposition identity (the load-combination primitive) ----------
+    {
+        std::printf("[F17] superposition: u(A)+u(B) == u(A+B)\n");
+        auto run = [&](real Pz, real My) -> SolveResult {
+            FrameModel m; fixtures::cantileverBare(m, 2000.0, mat, sec);
+            NodalLoad nl; nl.node = 1; nl.comp[Uz] = Pz; nl.comp[Ry] = My;
+            m.nodalLoads = { nl };
+            return solve(m);
+        };
+        const SolveResult rA  = run(1000.0, 0.0);
+        const SolveResult rB  = run(0.0, 2.0e6);
+        const SolveResult rAB = run(1000.0, 2.0e6);
+        const SolveResult rC  = combine({ rA, rB }, { 1.0, 1.0 });
+        real us = 1e-30, Rs = 1e-30, Ms = 1e-30, du = 0, dr = 0, dm = 0;
+        for (size_t k = 0; k < rAB.u.size(); ++k) { us = std::max(us, std::fabs(rAB.u[k])); du = std::max(du, std::fabs(rC.u[k] - rAB.u[k])); }
+        for (size_t k = 0; k < rAB.reactions.size(); ++k) { Rs = std::max(Rs, std::fabs(rAB.reactions[k])); dr = std::max(dr, std::fabs(rC.reactions[k] - rAB.reactions[k])); }
+        for (size_t e = 0; e < rAB.memberForces.size(); ++e) {
+            const auto& a = rC.memberForces[e].endI; const auto& b = rAB.memberForces[e].endI;
+            Ms = std::max(Ms, std::max(std::fabs(b.My), std::fabs(b.Mz)));
+            dm = std::max(dm, std::max(std::fabs(a.My - b.My), std::fabs(a.Mz - b.Mz)));
+        }
+        std::printf("   max|du|=%.2e/%.3g  max|dR|=%.2e/%.3g  max|dM|=%.2e/%.3g\n", du, us, dr, Rs, dm, Ms);
+        checkTrue("superposition u identity (rel<1e-10)", du < 1e-10 * us, "du/us=" + std::to_string(du / us));
+        checkTrue("superposition reactions identity",     dr < 1e-10 * Rs, "dr/Rs=" + std::to_string(dr / Rs));
+        checkTrue("superposition moments identity",       dm < 1e-10 * Ms, "dm/Ms=" + std::to_string(dm / Ms));
+    }
+
+    // ---------- F18: self-weight from rho (validates the kg/m^3 -> N-mm unit bridge) ----------
+    {
+        const real g = 9810.0;                                   // mm/s^2
+        const real wg = mat.rho * sec.A * g * 1.0e-12;           // beam weight/length [N/mm]
+        std::printf("[F18] self-weight  rho=%.0f -> w=%.6g N/mm\n", mat.rho, wg);
+
+        // (a) cantilever self-weight: fixed-end moment wL^2/2, vertical reaction wL,
+        //     tip deflection wL^4/(8 E Iz)  (square section -> resultant is plane-agnostic).
+        {
+            const real L = 2000.0;
+            FrameModel m; fixtures::cantileverBare(m, L, mat, sec);
+            addSelfWeight(m, g);
+            const SolveResult r = solve(m);
+            checkTrue("cantilever SW non-singular", !r.singular, r.diagnostic);
+            const auto& mf = r.memberForces[0].endI;
+            const real Mroot = std::sqrt(mf.My * mf.My + mf.Mz * mf.Mz);
+            const real Rvert = std::fabs(r.reaction(0, Uz));
+            const real dtip  = std::sqrt(r.disp(1, Uy) * r.disp(1, Uy) + r.disp(1, Uz) * r.disp(1, Uz));
+            checkClose("cantilever SW fixed-end moment wL^2/2", Mroot, wg * L * L / 2.0, 1e-6);
+            checkClose("cantilever SW reaction = wL",           Rvert, wg * L, 1e-6);
+            checkClose("cantilever SW tip defl wL^4/8EI",       dtip, wg * L * L * L * L / (8.0 * E * sec.Iz), 1e-6);
+        }
+        // (b) simply-supported self-weight: reactions wL/2, midspan deflection 5wL^4/384EI.
+        {
+            const real L = 3000.0;
+            FrameModel m; fixtures::simplySupportedBare(m, L, mat, sec);
+            addSelfWeight(m, g);
+            const SolveResult r = solve(m);
+            checkTrue("SS SW non-singular", !r.singular, r.diagnostic);
+            checkClose("SS SW reaction wL/2 (node0)", std::fabs(r.reaction(0, Uz)), wg * L / 2.0, 1e-6);
+            checkClose("SS SW midspan defl 5wL^4/384EI", std::fabs(r.disp(1, Uz)),
+                       5.0 * wg * L * L * L * L / (384.0 * E * sec.Iz), 1e-6);
+        }
+        // (c) shell self-weight (body load) == equivalent transverse pressure rho*t*g.
+        {
+            const real a = 1000.0, t = 10.0, nu = 0.3, Es = 30000.0;
+            Material smat(Es, Es / (2.0 * (1.0 + nu)), 2400.0); smat.nu = nu;   // rho = 2400 kg/m^3
+            const real p = smat.rho * t * g * 1.0e-12;            // equivalent pressure [MPa]
+            const int n = 12, c = (n / 2) * (n + 1) + (n / 2);
+            FrameModel mp; fixtures::squarePlateShell(mp, a, t, n, p, smat);   // pressure model
+            const SolveResult rp = solve(mp);
+            FrameModel mw; fixtures::squarePlateShell(mw, a, t, n, 0.0, smat);  // bare + self-weight
+            addSelfWeight(mw, g);
+            const SolveResult rw = solve(mw);
+            const real wP = std::fabs(rp.disp(c, Uz)), wW = std::fabs(rw.disp(c, Uz));
+            std::printf("   shell: pressure w=%.6g  self-weight w=%.6g\n", wP, wW);
+            checkTrue("shell SW non-singular", !rw.singular, rw.diagnostic);
+            checkClose("shell self-weight == rho*t*g pressure", wW, wP, 1e-9);
+        }
     }
 
     std::printf("\n%s  (failures=%d)\n", g_fail == 0 ? "ALL PASS" : "FAILURES", g_fail);

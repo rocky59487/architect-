@@ -383,11 +383,11 @@ def scale_loads(model: dict, factor: float) -> dict:
 
 
 def disp_by_node_id(model: dict, out: dict) -> dict[int, np.ndarray]:
-    return {int(node["id"]): out["disp"][idx] for idx, node in enumerate(model["nodes"])}
+    return {int(node["id"]): out["disp"][int(node["id"])] for node in model["nodes"]}
 
 
 def mf_by_member_id(model: dict, out: dict) -> dict[int, np.ndarray]:
-    return {int(member["id"]): out["mf"][idx] for idx, member in enumerate(model["members"]) if idx in out["mf"]}
+    return {int(member["id"]): out["mf"][int(member["id"])] for member in model["members"] if int(member["id"]) in out["mf"]}
 
 
 def stacked_disp_by_id(model: dict, out: dict, ids: Iterable[int] | None = None) -> np.ndarray:

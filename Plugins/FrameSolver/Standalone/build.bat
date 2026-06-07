@@ -37,6 +37,8 @@ cl /nologo /EHsc /std:c++17 /O2 /MD /utf-8 /DEIGEN_MPL2_ONLY ^
    Source\FrameCore\Private\FrameSolver.cpp ^
    Source\FrameCore\Private\ElasticAllowable.cpp ^
    Source\FrameCore\Private\Grillage.cpp ^
+   Source\FrameCore\Private\SelfWeight.cpp ^
+   Source\FrameCore\Private\Combination.cpp ^
    Standalone\main.cpp
 if errorlevel 1 ( echo [build] COMPILE FAILED & popd & exit /b 1 )
 

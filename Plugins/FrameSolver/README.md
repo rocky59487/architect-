@@ -1,35 +1,41 @@
-# FrameSolver — UE5.7 beam-column structural mechanics core
+# FrameSolver plugin
 
-Core physics engine for the architect-simulator graduation project. **Milestone 1**:
-a linear-elastic 3D Euler–Bernoulli direct-stiffness solver, validated standalone
-against closed-form analytic solutions.
+FrameSolver contains `FrameCore`, the engine-agnostic structural mechanics core used by
+the ArchSim UE host project and by the standalone validation tools.
+
+## Current scope
+
+- 3-D linear-elastic direct-stiffness solver.
+- Euler-Bernoulli beam-column elements, with optional Timoshenko shear flexibility.
+- Member end releases through static condensation.
+- MITC4 Reissner-Mindlin flat-shell facets for plate/shell analysis.
+- Legacy grillage plate idealization as a cheap beam-grid approximation.
+- Elastic allowable-stress D/C screening.
+
+Out of scope: geometric nonlinearity, dynamics/modal analysis, plastic collapse, and RC
+fiber-section ultimate-strength design.
 
 ## Layout
-- `Source/FrameCore/` — engine-agnostic pure C++ core (Eigen + std only).
-  - `Public/FrameCore/*.h` — Eigen-free public API (POD data model, `solve()`, `checkSection`).
-  - `Private/*.cpp` + `Private/FrameEigen.h` — Eigen confined here (dual-build include shim).
-  - `Private/Tests/*.cpp` — UE automation mirror (authored, compiled only with a host project).
-- `Standalone/` — console **gate** (the milestone-1 success criterion). No UE build needed.
-- `FrameSolver.uplugin` + `Source/FrameCore/FrameCore.Build.cs` — UE plugin descriptor +
-  module rules (Eigen via `AddEngineThirdPartyPrivateStaticDependencies`, `FRAMECORE_UE=1`).
-  Drop the whole `FrameSolver/` folder into `<YourProject>/Plugins/` when a `.uproject` exists.
 
-## Build & run the gate
+- `Source/FrameCore/`: pure C++17 core. Public headers are POD/std-only; Eigen stays in
+  private implementation files.
+- `Source/FrameCore/Private/Tests/`: UE automation tests for `FrameCore.*`.
+- `Standalone/`: console gates and CLI drivers used by the Python audits.
+
+## Verification
+
+Fast standalone gate:
+
 ```bat
 Standalone\build.bat
 ```
-Expected: `ALL PASS  (failures=0)`. Fixtures: cantilever (δ=PL³/3EI, M=PL),
-simply-supported UDL (δ=5wL⁴/384EI, M=wL²/8), mechanism detection, vertical column
-(axial sign / refVec degeneracy).
 
-## Design notes
-- Two layers: real-time **elastic** screen (`checkSection`, this milestone) and a future
-  **fiber-section nonlinear** precision layer — kept apart by `ISectionStrength`.
-- `checkSection` is an **elastic / allowable-stress** screen, **not** RC ultimate strength.
-- `StaticCondensation` (Schur) is a deferred **static-only** optimization (dynamics → CMS).
-- Full math + provenance: `../PFSFv2-to-UE5-transferable-math.md` (see §0 "三個適用邊界").
+Full gate from the repository root:
 
-## Excluded from milestone 1 (later)
-Nonlinear (P-Δ / corotational), fiber sections / RC ultimate, modal / dynamics,
-Schur substructuring impl, plate/wall equivalent folding, truss-release activation,
-GPU, host `.uproject` + in-editor integration.
+```powershell
+powershell -ExecutionPolicy Bypass -File Scripts\run_gate.ps1 -RequireOpenSees
+```
+
+The full gate runs standalone analytic/benchmark fixtures, UE headless automation, and
+OpenSees cross-validation. Use `-RequireOpenSees` in CI so a missing OpenSeesPy install
+cannot silently skip the external comparison.

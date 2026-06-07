@@ -1,34 +1,30 @@
-# FrameCore — standalone gate
+# FrameCore standalone tools
 
-Compiles the engine-agnostic FrameCore sources + `main.cpp` against UE's bundled
-Eigen 3.4.0, runs the analytic fixtures, exits 0 iff all pass.
+This directory builds the UE-free FrameCore executables used for validation.
+
+## Tools
+
+- `build.bat` -> `frametest.exe`: standalone analytic and benchmark gate. It covers
+  beam-column closed forms, releases, Timoshenko, grillage, MITC4 shell plate tests,
+  Scordelis-Lo roof, and pinched cylinder.
+- `build_cli.bat` -> `frame_cli.exe`: stdin/stdout solver driver used by Python audits
+  and OpenSees comparisons.
+- `build_perf.bat` -> `frame_perf.exe`: in-process performance benchmark.
 
 ## Quick start
-```bat
-:: from E:\project\FrameSolver\
-Standalone\build.bat
-```
-`build.bat` locates Visual Studio via `vswhere -prerelease` (VS18 is a preview
-build; plain `-latest` returns nothing), calls `vcvars64.bat`, runs `cl`, then the exe.
 
-## Manual cl (if you already have an x64 Native Tools prompt)
-```bat
-cl /nologo /EHsc /std:c++17 /O2 /MD /utf-8 /DEIGEN_MPL2_ONLY ^
-   /I"E:\project\UE_5.7\Engine\Source\ThirdParty\Eigen" ^
-   /I"Source\FrameCore\Public" /I"Source\FrameCore\Private" ^
-   Source\FrameCore\Private\*.cpp Standalone\main.cpp ^
-   /Fe:Standalone\frametest.exe /Fo:Standalone\obj\
-```
-(omit `FrameCoreModule.cpp` — it is UE-only; the explicit list in `build.bat` already does.)
+From the repository root:
 
-## CMake alternative
 ```bat
-cmake -S Standalone -B Standalone\build
-cmake --build Standalone\build
+Plugins\FrameSolver\Standalone\build.bat
 ```
 
-## Expected output
-```
-[F1] cantilever ... [F2] simply-supported ... [F3] mechanism ... [F4] vertical column ...
+Expected result:
+
+```text
 ALL PASS  (failures=0)
 ```
+
+The scripts locate Visual Studio through `vswhere` and compile against the UE-bundled
+Eigen headers. The public FrameCore API remains UE-free; only the build scripts know the
+local UE install path.
