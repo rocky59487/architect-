@@ -110,6 +110,23 @@ Mat12 transform12(const Mat3& R) {
     return T;
 }
 
+Mat12 localGeometric12(real P, real L) {
+    Mat12 g = Mat12::Zero();
+    const real L2 = L * L;
+    const real c = P / (30.0 * L);
+    // bending about local z, x-y plane (v=1,7 ; rz=5,11) — canonical signs
+    g(1,1)=36*c;    g(1,5)=3*L*c;   g(1,7)=-36*c;   g(1,11)=3*L*c;
+    g(5,1)=3*L*c;   g(5,5)=4*L2*c;  g(5,7)=-3*L*c;  g(5,11)=-L2*c;
+    g(7,1)=-36*c;   g(7,5)=-3*L*c;  g(7,7)=36*c;    g(7,11)=-3*L*c;
+    g(11,1)=3*L*c;  g(11,5)=-L2*c;  g(11,7)=-3*L*c; g(11,11)=4*L2*c;
+    // bending about local y, x-z plane (w=2,8 ; ry=4,10) — L-terms sign-flipped (mirror stiffness)
+    g(2,2)=36*c;    g(2,4)=-3*L*c;  g(2,8)=-36*c;   g(2,10)=-3*L*c;
+    g(4,2)=-3*L*c;  g(4,4)=4*L2*c;  g(4,8)=3*L*c;   g(4,10)=-L2*c;
+    g(8,2)=-36*c;   g(8,4)=3*L*c;   g(8,8)=36*c;    g(8,10)=3*L*c;
+    g(10,2)=-3*L*c; g(10,4)=-L2*c;  g(10,8)=3*L*c;  g(10,10)=4*L2*c;
+    return g;
+}
+
 Mat12 localMass12(real rho, real A, real Iy, real Iz, real L) {
     Mat12 m = Mat12::Zero();
     const real L2 = L * L;

@@ -18,6 +18,7 @@ public:
     bool prepare(const FrameModel& model, const SolveOptions& opts, std::string& why) override;
     void assemble(std::vector<Triplet>& trips) const override;
     void assembleMass(std::vector<Triplet>& trips) const override;
+    void assembleGeometric(std::vector<Triplet>& trips, const std::vector<real>& memberAxial) const override;
     void addEquivalentNodalLoads(VecX& F) const override;
     void recover(const VecX& u, SolveResult& R) const override;
 

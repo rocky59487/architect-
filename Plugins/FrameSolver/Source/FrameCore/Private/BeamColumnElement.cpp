@@ -81,6 +81,15 @@ void BeamColumnElement::assembleMass(std::vector<Triplet>& trips) const {
             trips.emplace_back(dofs_[a], dofs_[b], mg(a, b));
 }
 
+void BeamColumnElement::assembleGeometric(std::vector<Triplet>& trips, const std::vector<real>& memberAxial) const {
+    const real N = (e_ >= 0 && e_ < static_cast<int>(memberAxial.size())) ? memberAxial[e_] : 0.0; // compression +
+    const Mat12 kgL = localGeometric12(-N, L_);           // tension-positive P = -N
+    const Mat12 kgG = T_.transpose() * kgL * T_;
+    for (int a = 0; a < 12; ++a)
+        for (int b = 0; b < 12; ++b)
+            trips.emplace_back(dofs_[a], dofs_[b], kgG(a, b));
+}
+
 void BeamColumnElement::addEquivalentNodalLoads(VecX& F) const {
     if (Qf_.isZero(0)) return;
     const Vec12 peq = -(T_.transpose() * Qf_);   // P_equiv = -T^T Qf

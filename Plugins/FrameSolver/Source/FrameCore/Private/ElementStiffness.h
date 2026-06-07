@@ -31,6 +31,13 @@ Mat12 transform12(const Mat3& R);
 // consistent units (tonne/mm^3 = rho[kg/m^3] * 1e-12). Torsion uses the polar Ip = Iy + Iz.
 Mat12 localMass12(real rho, real A, real Iy, real Iz, real L);
 
+// 12x12 GEOMETRIC stiffness from the member axial force (stress stiffening, the basis of
+// P-Delta and linear buckling). `P` is the axial force, TENSION-POSITIVE (so P = -N for our
+// compression-positive end force N): tension stiffens, compression softens. Affects only the
+// two bending planes (axial/torsion rows are zero); same DOF order + sign convention as the
+// stiffness. Total tangent stiffness for stability is K_elastic + localGeometric12.
+Mat12 localGeometric12(real P, real L);
+
 // Static condensation of released local DOFs out of the element stiffness AND the
 // fixed-end forces. release[k]=true => local DOF k transmits no force (hinge/pin):
 //   kl*_rr = kl_rr - kl_rc kcc^-1 kl_cr ;  Qf*_r = Qf_r - kl_rc kcc^-1 Qf_c ;  rest = 0.

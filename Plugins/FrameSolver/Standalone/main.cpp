@@ -7,6 +7,7 @@
 #include "FrameCore/Combination.h"
 #include "FrameCore/InfluenceLine.h"
 #include "FrameCore/ModalAnalysis.h"
+#include "FrameCore/BucklingAnalysis.h"
 #include "FrameTestFixtures.h"
 
 #include <vector>
@@ -762,6 +763,39 @@ int main() {
             std::printf("   cantilever: omega1=%.6g (exact %.6g; f1=%.4f Hz)\n",
                         mr.modes[0].omega, w1ex, mr.modes[0].freqHz);
             checkClose("cantilever fundamental omega1 = 1.875^2 sqrt(EI/rhoAL^4)", mr.modes[0].omega, w1ex, 0.01);
+        }
+    }
+
+    // ---------- F23: linear buckling (geometric stiffness) vs Euler ----------
+    {
+        const real kPi = 3.14159265358979323846;
+        const real Pref = 1000.0;   // reference axial compression
+        std::printf("[F23] linear buckling (Euler column)\n");
+        // (a) pinned-pinned column: Pcr = pi^2 EI / L^2.
+        {
+            const int n = 10; const real L = 3000.0;
+            FrameModel m; fixtures::simplySupportedBeamN(m, n, L, mat, sec);
+            NodalLoad nl; nl.node = n; nl.comp[Ux] = -Pref; m.nodalLoads = { nl };
+            PreparedSystem ps = assembleAndFactor(m);
+            const BucklingResult br = solveBuckling(ps, m);
+            checkTrue("pinned-pinned buckling non-singular", !br.singular, br.diagnostic);
+            const real Pcr = br.criticalFactor * Pref;
+            const real PcrEx = kPi * kPi * E * sec.Iz / (L * L);
+            std::printf("   pinned-pinned: Pcr=%.6g (Euler %.6g, factor=%.4g)\n", Pcr, PcrEx, br.criticalFactor);
+            checkClose("Euler Pcr = pi^2 EI/L^2", Pcr, PcrEx, 0.01);
+        }
+        // (b) fixed-free (cantilever) column: Pcr = pi^2 EI / (2L)^2.
+        {
+            const int n = 10; const real L = 3000.0;
+            FrameModel m; fixtures::cantileverBeamN(m, n, L, mat, sec);
+            NodalLoad nl; nl.node = n; nl.comp[Ux] = -Pref; m.nodalLoads = { nl };
+            PreparedSystem ps = assembleAndFactor(m);
+            const BucklingResult br = solveBuckling(ps, m);
+            checkTrue("fixed-free buckling non-singular", !br.singular, br.diagnostic);
+            const real Pcr = br.criticalFactor * Pref;
+            const real PcrEx = kPi * kPi * E * sec.Iz / (4.0 * L * L);
+            std::printf("   fixed-free: Pcr=%.6g (Euler %.6g, factor=%.4g)\n", Pcr, PcrEx, br.criticalFactor);
+            checkClose("Euler Pcr = pi^2 EI/(2L)^2", Pcr, PcrEx, 0.01);
         }
     }
 

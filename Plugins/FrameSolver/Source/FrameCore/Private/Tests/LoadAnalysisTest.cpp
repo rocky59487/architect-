@@ -8,6 +8,7 @@
 #include "FrameCore/Combination.h"
 #include "FrameCore/InfluenceLine.h"
 #include "FrameCore/ModalAnalysis.h"
+#include "FrameCore/BucklingAnalysis.h"
 #include "FrameCore/Material.h"
 #include "FrameCore/Section.h"
 #include "FrameTestFixtures.h"
@@ -213,6 +214,39 @@ bool FFrameCoreModalBeamTest::RunTest(const FString&)
 		const double b1 = 1.8751040687;
 		const double w1ex = b1 * b1 * FMath::Sqrt(E * sec.Iz / (rhoC * sec.A * L * L * L * L));
 		TestTrue(TEXT("cantilever omega1 within 1%"), FMath::Abs(mr.modes[0].omega - w1ex) < 0.01 * w1ex);
+	}
+	return true;
+}
+
+// ---- F23 mirror: linear buckling vs Euler ----
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FFrameCoreBucklingColumnTest,
+	"FrameCore.Buckling.Column",
+	EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::SmokeFilter)
+bool FFrameCoreBucklingColumnTest::RunTest(const FString&)
+{
+	using namespace frame;
+	Section sec = Section::Rectangular(100.0, 100.0);
+	Material mat(210000.0, 80769.0, 7850.0);
+	const double E = 210000.0, kPi = 3.14159265358979323846, Pref = 1000.0;
+
+	{   // pinned-pinned: Pcr = pi^2 EI / L^2
+		const int n = 10; const double L = 3000.0;
+		FrameModel m; fixtures::simplySupportedBeamN(m, n, L, mat, sec);
+		NodalLoad nl; nl.node = n; nl.comp[Ux] = -Pref; m.nodalLoads = { nl };
+		PreparedSystem ps = assembleAndFactor(m);
+		const BucklingResult br = solveBuckling(ps, m);
+		TestFalse(TEXT("pinned-pinned buckling non-singular"), br.singular);
+		const double PcrEx = kPi * kPi * E * sec.Iz / (L * L);
+		TestTrue(TEXT("Euler Pcr = pi^2 EI/L^2"), FMath::Abs(br.criticalFactor * Pref - PcrEx) < 0.01 * PcrEx);
+	}
+	{   // fixed-free: Pcr = pi^2 EI / (2L)^2
+		const int n = 10; const double L = 3000.0;
+		FrameModel m; fixtures::cantileverBeamN(m, n, L, mat, sec);
+		NodalLoad nl; nl.node = n; nl.comp[Ux] = -Pref; m.nodalLoads = { nl };
+		PreparedSystem ps = assembleAndFactor(m);
+		const BucklingResult br = solveBuckling(ps, m);
+		const double PcrEx = kPi * kPi * E * sec.Iz / (4.0 * L * L);
+		TestTrue(TEXT("Euler Pcr = pi^2 EI/(2L)^2"), FMath::Abs(br.criticalFactor * Pref - PcrEx) < 0.01 * PcrEx);
 	}
 	return true;
 }
