@@ -9,6 +9,7 @@
 #include "FrameCore/ModalAnalysis.h"
 #include "FrameCore/BucklingAnalysis.h"
 #include "FrameCore/ResponseSpectrum.h"
+#include "FrameCore/ModalDynamics.h"
 #include "FrameTestFixtures.h"
 
 #include <vector>
@@ -836,6 +837,41 @@ int main() {
             const real r1 = maxOf(rs.effMass) / rs.totalMass;
             std::printf("   cantilever: 1st-mode eff mass ratio=%.4f (0.6131)\n", r1);
             checkClose("cantilever 1st-mode eff mass ~ 0.613", r1, 0.6131, 0.03);
+        }
+    }
+
+    // ---------- F25: modal-superposition time history (Newmark step response) ----------
+    {
+        const real kPi = 3.14159265358979323846;
+        std::printf("[F25] modal time-history (step load, Newmark-beta)\n");
+        const int n = 10; const real L = 3000.0;
+        FrameModel m; fixtures::cantileverBeamN(m, n, L, mat, sec);
+        NodalLoad nl; nl.node = n; nl.comp[Uz] = -1000.0; m.nodalLoads = { nl };
+        PreparedSystem ps = assembleAndFactor(m);
+        const int cdof = gdof(n, Uz);
+        // (a) single-mode SDOF: an undamped suddenly-applied (step) load gives DLF = 2.
+        {
+            const ModalResult mr = solveModal(ps, ModalOptions{ 1 });
+            const real T1 = 2.0 * kPi / mr.modes[0].omega;
+            ModalDynamicsOptions opt; opt.zeta = 0.0;  opt.dt = T1 / 400; opt.nSteps = 400;   // ~1 period
+            const ModalTimeHistory th = solveModalStepResponse(ps, m, mr, opt);
+            real peak = 0; for (const auto& u : th.u) peak = std::max(peak, std::fabs(u[cdof]));
+            ModalDynamicsOptions od = opt; od.zeta = 0.4; od.nSteps = 4000;                   // settle -> static
+            const ModalTimeHistory td = solveModalStepResponse(ps, m, mr, od);
+            const real settled = std::fabs(td.u.back()[cdof]);
+            std::printf("   SDOF: peak=%.5g  static(settled)=%.5g  DLF=%.4f\n", peak, settled, peak / settled);
+            checkClose("undamped step DLF = 2", peak / settled, 2.0, 0.01);
+        }
+        // (b) multi-mode damped step response settles to the FULL static solution.
+        {
+            const ModalResult mr = solveModal(ps, ModalOptions{ 20 });
+            const real T1 = 2.0 * kPi / mr.modes[0].omega;
+            ModalDynamicsOptions opt; opt.zeta = 0.10; opt.dt = T1 / 100; opt.nSteps = 3000;   // many periods
+            const ModalTimeHistory th = solveModalStepResponse(ps, m, mr, opt);
+            const SolveResult st = solveLoad(ps, m);
+            const real settled = th.u.back()[cdof], staticv = st.u[cdof];
+            std::printf("   multi-mode damped: settled=%.5g  static=%.5g\n", settled, staticv);
+            checkClose("damped step settles to static", settled, staticv, 0.02);
         }
     }
 

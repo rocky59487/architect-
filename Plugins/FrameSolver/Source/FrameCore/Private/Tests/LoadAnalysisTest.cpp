@@ -10,6 +10,7 @@
 #include "FrameCore/ModalAnalysis.h"
 #include "FrameCore/BucklingAnalysis.h"
 #include "FrameCore/ResponseSpectrum.h"
+#include "FrameCore/ModalDynamics.h"
 #include "FrameCore/Material.h"
 #include "FrameCore/Section.h"
 #include "FrameTestFixtures.h"
@@ -282,6 +283,44 @@ bool FFrameCoreResponseSpectrumTest::RunTest(const FString&)
 		const ModalResult mr = solveModal(ps, ModalOptions{ 100 });
 		const ResponseSpectrumResult rs = solveResponseSpectrum(ps, mr, sp, Uz, SpectrumCombo::SRSS, 0.05);
 		TestTrue(TEXT("cantilever 1st-mode eff mass ~ 0.613"), FMath::Abs(maxOf(rs.effMass) / rs.totalMass - 0.6131) < 0.03);
+	}
+	return true;
+}
+
+// ---- F25 mirror: modal-superposition step response ----
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FFrameCoreDynamicsStepTest,
+	"FrameCore.Dynamics.StepResponse",
+	EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::SmokeFilter)
+bool FFrameCoreDynamicsStepTest::RunTest(const FString&)
+{
+	using namespace frame;
+	Section sec = Section::Rectangular(100.0, 100.0);
+	Material mat(210000.0, 80769.0, 7850.0);
+	const double kPi = 3.14159265358979323846;
+	const int n = 10; const double L = 3000.0;
+	FrameModel m; fixtures::cantileverBeamN(m, n, L, mat, sec);
+	NodalLoad nl; nl.node = n; nl.comp[Uz] = -1000.0; m.nodalLoads = { nl };
+	PreparedSystem ps = assembleAndFactor(m);
+	const int cdof = gdof(n, Uz);
+	{   // single-mode undamped step -> DLF = 2
+		const ModalResult mr = solveModal(ps, ModalOptions{ 1 });
+		const double T1 = 2.0 * kPi / mr.modes[0].omega;
+		ModalDynamicsOptions opt; opt.zeta = 0.0; opt.dt = T1 / 400; opt.nSteps = 400;
+		const ModalTimeHistory th = solveModalStepResponse(ps, m, mr, opt);
+		double peak = 0; for (const auto& u : th.u) peak = FMath::Max(peak, FMath::Abs(u[cdof]));
+		ModalDynamicsOptions od = opt; od.zeta = 0.4; od.nSteps = 4000;
+		const ModalTimeHistory td = solveModalStepResponse(ps, m, mr, od);
+		const double settled = FMath::Abs(td.u.back()[cdof]);
+		TestTrue(TEXT("undamped step DLF = 2"), FMath::Abs(peak / settled - 2.0) < 0.01);
+	}
+	{   // multi-mode damped step settles to the full static solution
+		const ModalResult mr = solveModal(ps, ModalOptions{ 20 });
+		const double T1 = 2.0 * kPi / mr.modes[0].omega;
+		ModalDynamicsOptions opt; opt.zeta = 0.10; opt.dt = T1 / 100; opt.nSteps = 3000;
+		const ModalTimeHistory th = solveModalStepResponse(ps, m, mr, opt);
+		const SolveResult st = solveLoad(ps, m);
+		TestTrue(TEXT("damped step settles to static"),
+			FMath::Abs(th.u.back()[cdof] - st.u[cdof]) < 0.02 * FMath::Abs(st.u[cdof]));
 	}
 	return true;
 }
