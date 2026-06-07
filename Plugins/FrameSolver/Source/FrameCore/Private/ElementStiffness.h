@@ -25,6 +25,12 @@ Mat12 localStiffness12T(real E, real G, real A, real Iy, real Iz, real J, real L
 // 12x12 transform T = blockdiag(R, R, R, R); u_local = T * u_global, k_g = T^T k_l T.
 Mat12 transform12(const Mat3& R);
 
+// 12x12 CONSISTENT mass matrix (Euler-Bernoulli, translational; no cross-section rotary
+// inertia, matching the analytic frequency omega_n = (n.pi/L)^2 sqrt(EI/rho.A)). Same DOF
+// order + sign convention as localStiffness12. `rho` MUST already be in the engine's
+// consistent units (tonne/mm^3 = rho[kg/m^3] * 1e-12). Torsion uses the polar Ip = Iy + Iz.
+Mat12 localMass12(real rho, real A, real Iy, real Iz, real L);
+
 // Static condensation of released local DOFs out of the element stiffness AND the
 // fixed-end forces. release[k]=true => local DOF k transmits no force (hinge/pin):
 //   kl*_rr = kl_rr - kl_rc kcc^-1 kl_cr ;  Qf*_r = Qf_r - kl_rc kcc^-1 Qf_c ;  rest = 0.

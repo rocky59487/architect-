@@ -17,6 +17,7 @@ public:
     int  localDof() const override { return 12; }
     bool prepare(const FrameModel& model, const SolveOptions& opts, std::string& why) override;
     void assemble(std::vector<Triplet>& trips) const override;
+    void assembleMass(std::vector<Triplet>& trips) const override;
     void addEquivalentNodalLoads(VecX& F) const override;
     void recover(const VecX& u, SolveResult& R) const override;
 
@@ -24,6 +25,7 @@ private:
     int      e_  = -1;                 // member index in model.members
     MemberId id_ = 0;                  // member id (for the result mapping)
     Mat12    kl_ = Mat12::Zero();      // local stiffness (possibly release-condensed)
+    Mat12    ml_ = Mat12::Zero();      // local consistent mass (for modal analysis)
     Mat12    T_  = Mat12::Zero();      // transform: u_local = T u_global
     real     L_  = 0;
     int      dofs_[12] = { 0 };        // global DOF indices [node_i 6][node_j 6]

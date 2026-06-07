@@ -1,6 +1,5 @@
 #include "FrameCore/FrameSolver.h"
-#include "FrameEigen.h"
-#include "IElement.h"
+#include "PreparedSystemImpl.h"
 #include "BeamColumnElement.h"
 #include "MITC4ShellElement.h"
 
@@ -11,18 +10,6 @@
 #include <memory>
 
 namespace frame {
-
-// ---- Opaque prepared-system state (Eigen lives here, never in the public header) ----
-struct PreparedSystem::Impl {
-    int                                          N = 0;
-    SpMat                                        K;        // full global K (needed for reactions R = Ku - F)
-    std::vector<int>                             fmap;     // free-DOF map (-1 = constrained)
-    int                                          nf = 0;
-    LDLTSolver                                   ldlt;     // factorization of K_ff
-    std::vector<std::unique_ptr<IElement>>       elems;    // prepared (geometry + baked Qf_) for loads + recovery
-    bool                                         singular = false;
-    std::string                                  diagnostic;
-};
 
 PreparedSystem::PreparedSystem() : impl(std::make_unique<Impl>()) {}
 PreparedSystem::~PreparedSystem() = default;

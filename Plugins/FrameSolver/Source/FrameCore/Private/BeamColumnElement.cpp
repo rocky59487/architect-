@@ -28,6 +28,9 @@ bool BeamColumnElement::prepare(const FrameModel& model, const SolveOptions& opt
                                mem.sec->Iy, mem.sec->Iz, mem.sec->J, L_);
     }
     T_  = transform12(Rm);
+    // consistent mass (rho kg/m^3 -> tonne/mm^3 via 1e-12). Not condensed by releases
+    // (releases are a static device; modal analysis uses the unreleased element).
+    ml_ = localMass12(mem.mat->rho * 1.0e-12, mem.sec->A, mem.sec->Iy, mem.sec->Iz, L_);
     for (int d = 0; d < 6; ++d) { dofs_[d] = gdof(ni, d); dofs_[6 + d] = gdof(nj, d); }
 
     // ---- fixed-end forces Qf (local) from this member's UDLs. Same per-element
@@ -69,6 +72,13 @@ void BeamColumnElement::assemble(std::vector<Triplet>& trips) const {
     for (int a = 0; a < 12; ++a)
         for (int b = 0; b < 12; ++b)
             trips.emplace_back(dofs_[a], dofs_[b], kg(a, b));
+}
+
+void BeamColumnElement::assembleMass(std::vector<Triplet>& trips) const {
+    const Mat12 mg = T_.transpose() * ml_ * T_;
+    for (int a = 0; a < 12; ++a)
+        for (int b = 0; b < 12; ++b)
+            trips.emplace_back(dofs_[a], dofs_[b], mg(a, b));
 }
 
 void BeamColumnElement::addEquivalentNodalLoads(VecX& F) const {

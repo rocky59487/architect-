@@ -34,6 +34,11 @@ struct IElement {
     // (K = T^T kl T scattered to the element's global DOFs).
     virtual void assemble(std::vector<Triplet>& trips) const = 0;
 
+    // Append this element's global-DOF CONSISTENT MASS contribution as triplets
+    // (M = T^T ml T). Default empty so elements without mass (or analyses that don't
+    // need it) are unaffected; BeamColumnElement and MITC4ShellElement override it.
+    virtual void assembleMass(std::vector<Triplet>& trips) const { (void)trips; }
+
     // Add this element's equivalent nodal loads (P_equiv = -T^T Qf) into global F.
     virtual void addEquivalentNodalLoads(VecX& F) const = 0;
 

@@ -25,6 +25,7 @@
 //   MF   id Ni Vyi Vzi Ti Myi Mzi Nj Vyj Vzj Tj Myj Mzj   (one per member)
 //   SF   id Mxx Myy Mxy Qx Qy Nxx Nyy Nxy                  (one per shell)
 #include "FrameCore/FrameSolver.h"
+#include "FrameCore/ModalAnalysis.h"
 
 #include <vector>
 #include <string>
@@ -51,6 +52,7 @@ int main() {
     std::vector<RawShell> shes;
     std::vector<RawNL> nls; std::vector<RawUDL> udls; std::vector<RawSP> sps;
     SolveOptions opt;
+    int nModes = 0;
 
     std::string line;
     while (std::getline(std::cin, line)) {
@@ -66,6 +68,7 @@ int main() {
         else if (tag == "UDL") { RawUDL u{}; ss >> u.member >> u.wx >> u.wy >> u.wz; udls.push_back(u); }
         else if (tag == "SPRESS") { RawSP s{}; ss >> s.shell >> s.p; sps.push_back(s); }
         else if (tag == "OPT") { int er=0, ut=0; real pt=1e-12; ss >> er >> ut >> pt; opt.enableReleases=er!=0; opt.useTimoshenko=ut!=0; opt.pivotTol=pt; }
+        else if (tag == "EIGEN") { ss >> nModes; }
         else if (tag == "END") break;
     }
 
@@ -121,6 +124,14 @@ int main() {
         const ShellElementForces& sf = r.shellForces[e];
         std::printf("SF %d %.12g %.12g %.12g %.12g %.12g %.12g %.12g %.12g\n", sf.shell,
                     sf.Mxx, sf.Myy, sf.Mxy, sf.Qx, sf.Qy, sf.Nxx, sf.Nyy, sf.Nxy);
+    }
+    if (nModes > 0) {
+        const PreparedSystem ps = assembleAndFactor(model, opt);
+        ModalOptions mo; mo.numModes = nModes;
+        const ModalResult mr = solveModal(ps, mo);
+        std::printf("FREQ %d", (int)mr.modes.size());
+        for (const auto& md : mr.modes) std::printf(" %.12g", md.omega);   // rad/s
+        std::printf("\n");
     }
     return 0;
 }

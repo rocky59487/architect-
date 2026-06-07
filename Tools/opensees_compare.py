@@ -368,6 +368,70 @@ def shell_models():
     ]
 
 
+# ----------------------------------------------------------------- modal (eigen)
+def run_frame_cli_modal(model, nModes):
+    lines = []
+    for m in model["materials"]:
+        lines.append(f"MAT {m['E']} {m['G']} {m.get('rho', 7850.0)}")
+    for s in model["sections"]:
+        lines.append("SEC {A} {Iy} {Iz} {J} {cy} {cz} {Asy} {Asz}".format(**s))
+    for n in model["nodes"]:
+        fp = list(n["fix"]) + list(n.get("presc", [0, 0, 0, 0, 0, 0]))
+        lines.append("NODE {} {} {} {} {}".format(n["id"], n["x"], n["y"], n["z"], " ".join(str(v) for v in fp)))
+    for e in model["members"]:
+        rv = e["refvec"]
+        lines.append(f"MEMBER {e['id']} {e['i']} {e['j']} {e['mat']} {e['sec']} {rv[0]} {rv[1]} {rv[2]}")
+    lines.append(f"EIGEN {nModes}")
+    lines.append("END")
+    p = subprocess.run([CLI], input="\n".join(lines) + "\n", capture_output=True, text=True)
+    if p.returncode != 0:
+        raise RuntimeError("frame_cli modal failed: " + p.stderr)
+    for ln in p.stdout.splitlines():
+        t = ln.split()
+        if t and t[0] == "FREQ":
+            return sorted(float(x) for x in t[2:2 + int(t[1])])
+    return []
+
+
+def run_opensees_modal(model, nModes):
+    ops.wipe()
+    ops.model("basic", "-ndm", 3, "-ndf", 6)
+    for n in model["nodes"]:
+        ops.node(n["id"], float(n["x"]), float(n["y"]), float(n["z"]))
+        ops.fix(n["id"], *[int(x) for x in n["fix"]])
+    for e in model["members"]:
+        pi = next(nn for nn in model["nodes"] if nn["id"] == e["i"])
+        pj = next(nn for nn in model["nodes"] if nn["id"] == e["j"])
+        vert = abs(pj["x"] - pi["x"]) < 1e-9 and abs(pj["y"] - pi["y"]) < 1e-9
+        vecxz = (1.0, 0.0, 0.0) if vert else (0.0, 0.0, 1.0)
+        ops.geomTransf("Linear", e["id"] + 1, *vecxz)
+        m = model["materials"][e["mat"]]; s = model["sections"][e["sec"]]
+        massPerLen = m.get("rho", 0.0) * 1e-12 * s["A"]      # consistent units (tonne/mm^3 * mm^2)
+        # consistent (-cMass) mass to match our localMass12; Iy/Iz swapped per the convention bridge.
+        ops.element("elasticBeamColumn", e["id"] + 1, e["i"], e["j"],
+                    s["A"], m["E"], m["G"], s["J"], s["Iz"], s["Iy"], e["id"] + 1,
+                    "-mass", massPerLen, "-cMass")
+    eigs = ops.eigen(nModes)
+    return sorted(math.sqrt(abs(l)) for l in eigs)
+
+
+def modal_models():
+    def beam(name, n, L, supports):
+        sec = square_section(100.0)
+        nodes = []
+        for i in range(n + 1):
+            fix = supports(i, n)
+            nodes.append(dict(id=i, x=L * i / n, y=0.0, z=0.0, fix=fix))
+        members = [dict(id=i, i=i, j=i + 1, mat=0, sec=0, refvec=(0, 0, 1)) for i in range(n)]
+        mats = [dict(E=210000.0, G=80769.0, rho=7850.0)]
+        return dict(name=name, materials=mats, sections=[sec], nodes=nodes, members=members, nModes=4)
+    cant = beam("modal cantilever", 12, 3000.0,
+                lambda i, n: [1, 1, 1, 1, 1, 1] if i == 0 else [0, 0, 0, 0, 0, 0])
+    ss = beam("modal simply-supported", 12, 4000.0,
+              lambda i, n: [1, 1, 1, 1, 0, 0] if i == 0 else ([0, 1, 1, 0, 0, 0] if i == n else [0, 0, 0, 0, 0, 0]))
+    return [cant, ss]
+
+
 # ----------------------------------------------------------------- driver
 def main():
     if not os.path.exists(CLI):
@@ -384,6 +448,7 @@ def main():
     if relaxed:
         TOL_DISP_VS_OS, TOL_FORCE_VS_OS, TOL_VS_ANALYTIC = 1e-4, 1e-3, 2e-3
         TOL_SHELL_VS_OS = 1e-3
+        TOL_MODAL = 1e-2
     else:
         TOL_DISP_VS_OS, TOL_FORCE_VS_OS, TOL_VS_ANALYTIC = 1e-8, 1e-8, 1e-6
         # Our flat-shell and OpenSees ShellMITC4 are the same element and agree on node
@@ -391,6 +456,9 @@ def main():
         # match). The 1e-7 gate leaves headroom for FP/OpenSees-version variation while
         # still catching any real regression.
         TOL_SHELL_VS_OS = 1e-7
+        # Our consistent mass vs OpenSees elasticBeamColumn -cMass: same EB consistent mass,
+        # natural frequencies agree closely.
+        TOL_MODAL = 1e-4
     print(f"  tolerances: {'RELAXED (report)' if relaxed else 'STRICT (gate)'}  "
           f"disp={TOL_DISP_VS_OS:.0e} force={TOL_FORCE_VS_OS:.0e} analytic={TOL_VS_ANALYTIC:.0e}")
 
@@ -444,6 +512,22 @@ def main():
         print(f"  disp diff (ours vs OpenSees ShellMITC4) = {wd:.3e}   "
               f"{'PASS' if okd else 'FAIL'} (tol {TOL_SHELL_VS_OS:.0e})")
         failures += (0 if okd else 1)
+
+    # ---- modal cross-validation vs OpenSees eigen ----
+    print("\n" + "-" * 64)
+    print(" Modal (natural frequencies) vs OpenSees eigen")
+    print("-" * 64)
+    for M in modal_models():
+        f_mine = run_frame_cli_modal(M, M["nModes"])
+        f_os = run_opensees_modal(M, M["nModes"])
+        print(f"\n[{M['name']}]")
+        k = min(len(f_mine), len(f_os), 3)
+        worst = max((abs(f_mine[i] - f_os[i]) / max(abs(f_os[i]), 1e-30) for i in range(k)), default=1.0)
+        okm = k > 0 and worst < TOL_MODAL
+        print(f"  omega(rad/s) ours={[round(x, 4) for x in f_mine[:k]]}")
+        print(f"               OS  ={[round(x, 4) for x in f_os[:k]]}")
+        print(f"  max rel diff = {worst:.3e}   {'PASS' if okm else 'FAIL'} (tol {TOL_MODAL:.0e})")
+        failures += (0 if okm else 1)
 
     print("\n" + "=" * 64)
     if failures == 0:

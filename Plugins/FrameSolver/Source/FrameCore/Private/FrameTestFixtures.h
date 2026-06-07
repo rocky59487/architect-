@@ -168,6 +168,15 @@ inline void simplySupportedBeamN(FrameModel& m, int n, real L, const Material& m
     for (int i = 0; i < n; ++i) m.members.push_back(Member(i, i, i + 1, pm, ps));
 }
 
+// Cantilever beam discretized into n equal segments (encastre at node 0). For modal /
+// buckling tests. omega_1 = 1.875^2 * sqrt(EI/(rho*A*L^4)).
+inline void cantileverBeamN(FrameModel& m, int n, real L, const Material& mat, const Section& sec) {
+    const Material* pm; const Section* ps; prepMatSec(m, mat, sec, pm, ps);
+    m.nodes.clear(); m.members.clear();
+    for (int i = 0; i <= n; ++i) { Node nd(i, L * i / n, 0, 0); if (i == 0) nd.fixAll(); m.nodes.push_back(nd); }
+    for (int i = 0; i < n; ++i) m.members.push_back(Member(i, i, i + 1, pm, ps));
+}
+
 // Two-span continuous beam (A - midL - B - midR - C), equal spans L, NO loads (the caller
 // applies live-load PATTERNS via member UDLs). Members 0,1 = left span; 2,3 = right span.
 // Supports: A pin (Ux,Uy,Uz,Rx), interior B and end C restrain Uy,Uz (mirror of the F2

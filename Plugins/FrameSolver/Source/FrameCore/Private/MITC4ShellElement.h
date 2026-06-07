@@ -19,6 +19,7 @@ public:
     int  localDof() const override { return 24; }
     bool prepare(const FrameModel& model, const SolveOptions& opts, std::string& why) override;
     void assemble(std::vector<Triplet>& trips) const override;
+    void assembleMass(std::vector<Triplet>& trips) const override;
     void addEquivalentNodalLoads(VecX& F) const override;
     void recover(const VecX& u, SolveResult& R) const override;
 
@@ -29,6 +30,7 @@ private:
     int   s_   = -1;                 // shell index in model.shells
     int   id_  = 0;                  // shell id (result mapping)
     Mat24 kl_  = Mat24::Zero();      // local 24x24 stiffness (membrane + bending + drilling)
+    Mat24 ml_  = Mat24::Zero();      // local 24x24 consistent mass (for modal analysis)
     Mat24 T_   = Mat24::Zero();      // transform: u_local = T u_global  (blockdiag R x8)
     int   dofs_[24] = { 0 };         // global DOF indices, 6 per corner node
     Vec24 Qf_  = Vec24::Zero();      // equivalent nodal loads from transverse pressure (local)

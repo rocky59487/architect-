@@ -226,6 +226,31 @@ Mat12 membraneK(const real xl[4], const real yl[4], real E, real nu, real G, rea
     return K;
 }
 
+// 24x24 consistent mass in the facet's local DOF order [u,v,w,thx,thy,thz] x4. Translational
+// inertia rho*t for u,v,w; rotary inertia rho*t^3/12 for thx,thy,thz (the drilling thz gets the
+// same small rotary term so the mass matrix is positive-definite -> the modal eigenproblem is
+// well-posed). `rho` is already in consistent units (tonne/mm^3).
+Eigen::Matrix<real, 24, 24> shellMass24(const real xl[4], const real yl[4], real rho, real t) {
+    Eigen::Matrix<real, 24, 24> M = Eigen::Matrix<real, 24, 24>::Zero();
+    const real mTrans = rho * t;                 // per unit area, translational
+    const real mRot   = rho * t * t * t / 12.0;  // per unit area, rotary
+    for (int a = 0; a < 2; ++a)
+        for (int b = 0; b < 2; ++b) {
+            const real xi = kG[a], eta = kG[b];
+            real Jinv[2][2];
+            const real detJ = jacobian(xl, yl, xi, eta, Jinv);
+            real N[4]; shapeN(xi, eta, N);
+            const real wdet = kW[a] * kW[b] * detJ;
+            for (int i = 0; i < 4; ++i)
+                for (int j = 0; j < 4; ++j) {
+                    const real NN = wdet * N[i] * N[j];
+                    for (int d = 0; d < 3; ++d) M(6 * i + d, 6 * j + d) += mTrans * NN;  // u,v,w
+                    for (int d = 3; d < 6; ++d) M(6 * i + d, 6 * j + d) += mRot * NN;    // thx,thy,thz
+                }
+        }
+    return M;
+}
+
 } // anonymous namespace
 
 // Map plate DOF [w,bx,by] x4 -> shell-local DOF [u,v,w,Rx,Ry,Rz] x4 (12x24):
@@ -313,6 +338,9 @@ bool MITC4ShellElement::prepare(const FrameModel& model, const SolveOptions& /*o
     kl_ += Pb.transpose() * Kp * Pb;
     kl_ += Pm.transpose() * Km * Pm;
 
+    // consistent mass (rho kg/m^3 -> tonne/mm^3 via 1e-12) for modal analysis
+    ml_ = shellMass24(xl_, yl_, sh.mat->rho * 1.0e-12, t_);
+
     // ---- transverse pressure -> consistent nodal loads on the local-w (Uz) DOFs.
     // Qf_ holds the LOCAL equivalent nodal load; addEquivalentNodalLoads rotates it
     // to global via F += T^T Qf_. ----
@@ -340,6 +368,13 @@ void MITC4ShellElement::assemble(std::vector<Triplet>& trips) const {
     for (int a = 0; a < 24; ++a)
         for (int b = 0; b < 24; ++b)
             if (kg(a, b) != 0.0) trips.emplace_back(dofs_[a], dofs_[b], kg(a, b));
+}
+
+void MITC4ShellElement::assembleMass(std::vector<Triplet>& trips) const {
+    const Mat24 mg = T_.transpose() * ml_ * T_;
+    for (int a = 0; a < 24; ++a)
+        for (int b = 0; b < 24; ++b)
+            if (mg(a, b) != 0.0) trips.emplace_back(dofs_[a], dofs_[b], mg(a, b));
 }
 
 void MITC4ShellElement::addEquivalentNodalLoads(VecX& F) const {

@@ -6,6 +6,7 @@
 #include "FrameCore/SelfWeight.h"
 #include "FrameCore/Combination.h"
 #include "FrameCore/InfluenceLine.h"
+#include "FrameCore/ModalAnalysis.h"
 #include "FrameTestFixtures.h"
 
 #include <vector>
@@ -728,6 +729,40 @@ int main() {
         std::printf("   reaction IL err=%.2e (analytic) / %.2e (Muller-Breslau);  moment IL err=%.2e (peak ab/L=%.0f)\n",
                     eAna, eMB, eShape, peak);
         checkTrue("midspan moment IL == triangle (peak ab/L)", eShape < 1e-6 * peak, "e=" + std::to_string(eShape));
+    }
+
+    // ---------- F22: modal analysis (free-vibration natural frequencies) ----------
+    {
+        const real kPi = 3.14159265358979323846;
+        const real rhoC = mat.rho * 1.0e-12;   // consistent units (tonne/mm^3)
+        std::printf("[F22] modal analysis  (rho=%.0f -> %.3e tonne/mm^3)\n", mat.rho, rhoC);
+        // (a) simply-supported beam, fundamental omega1 = (pi/L)^2 sqrt(EI/(rho A)).
+        {
+            const int n = 12; const real L = 4000.0;
+            FrameModel m; fixtures::simplySupportedBeamN(m, n, L, mat, sec);
+            PreparedSystem ps = assembleAndFactor(m);
+            ModalOptions mo; mo.numModes = 4;
+            const ModalResult mr = solveModal(ps, mo);
+            checkTrue("SS modal non-singular", !mr.singular && mr.modes.size() >= 2, mr.diagnostic);
+            const real w1ex = kPi * kPi / (L * L) * std::sqrt(E * sec.Iz / (rhoC * sec.A));
+            std::printf("   SS beam: omega1=%.6g rad/s (exact %.6g; f1=%.4f Hz)\n",
+                        mr.modes[0].omega, w1ex, mr.modes[0].freqHz);
+            checkClose("SS fundamental omega1 = (pi/L)^2 sqrt(EI/rhoA)", mr.modes[0].omega, w1ex, 0.01);
+            checkTrue("modes ascending", mr.modes[1].omega >= mr.modes[0].omega * 0.999, "");
+        }
+        // (b) cantilever, fundamental omega1 = 1.875^2 sqrt(EI/(rho A L^4)).
+        {
+            const int n = 12; const real L = 3000.0;
+            FrameModel m; fixtures::cantileverBeamN(m, n, L, mat, sec);
+            PreparedSystem ps = assembleAndFactor(m);
+            const ModalResult mr = solveModal(ps, ModalOptions{});
+            checkTrue("cantilever modal non-singular", !mr.singular && !mr.modes.empty(), mr.diagnostic);
+            const real beta1 = 1.8751040687;
+            const real w1ex = beta1 * beta1 * std::sqrt(E * sec.Iz / (rhoC * sec.A * L * L * L * L));
+            std::printf("   cantilever: omega1=%.6g (exact %.6g; f1=%.4f Hz)\n",
+                        mr.modes[0].omega, w1ex, mr.modes[0].freqHz);
+            checkClose("cantilever fundamental omega1 = 1.875^2 sqrt(EI/rhoAL^4)", mr.modes[0].omega, w1ex, 0.01);
+        }
     }
 
     std::printf("\n%s  (failures=%d)\n", g_fail == 0 ? "ALL PASS" : "FAILURES", g_fail);

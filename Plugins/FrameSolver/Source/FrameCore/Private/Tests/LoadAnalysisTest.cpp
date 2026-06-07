@@ -7,6 +7,7 @@
 #include "FrameCore/SelfWeight.h"
 #include "FrameCore/Combination.h"
 #include "FrameCore/InfluenceLine.h"
+#include "FrameCore/ModalAnalysis.h"
 #include "FrameCore/Material.h"
 #include "FrameCore/Section.h"
 #include "FrameTestFixtures.h"
@@ -179,6 +180,40 @@ bool FFrameCoreLoadInfluenceLineTest::RunTest(const FString&)
 	}
 	TestTrue(TEXT("reaction IL == (L-x)/L"), eAna < 1e-9);
 	TestTrue(TEXT("reaction IL == Muller-Breslau deflected shape"), eMB < 1e-9);
+	return true;
+}
+
+// ---- F22 mirror: modal analysis (natural frequencies) ----
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FFrameCoreModalBeamTest,
+	"FrameCore.Modal.Beam",
+	EAutomationTestFlags_ApplicationContextMask | EAutomationTestFlags::SmokeFilter)
+bool FFrameCoreModalBeamTest::RunTest(const FString&)
+{
+	using namespace frame;
+	Section sec = Section::Rectangular(100.0, 100.0);
+	Material mat(210000.0, 80769.0, 7850.0);
+	const double E = 210000.0, kPi = 3.14159265358979323846, rhoC = mat.rho * 1.0e-12;
+
+	{   // simply-supported fundamental omega1 = (pi/L)^2 sqrt(EI/rhoA)
+		const int n = 12; const double L = 4000.0;
+		FrameModel m; fixtures::simplySupportedBeamN(m, n, L, mat, sec);
+		PreparedSystem ps = assembleAndFactor(m);
+		ModalOptions mo; mo.numModes = 3;
+		const ModalResult mr = solveModal(ps, mo);
+		TestFalse(TEXT("SS modal non-singular"), mr.singular);
+		TestTrue(TEXT("has modes"), mr.modes.size() >= 1);
+		const double w1ex = kPi * kPi / (L * L) * FMath::Sqrt(E * sec.Iz / (rhoC * sec.A));
+		TestTrue(TEXT("SS omega1 within 1%"), FMath::Abs(mr.modes[0].omega - w1ex) < 0.01 * w1ex);
+	}
+	{   // cantilever fundamental omega1 = 1.875^2 sqrt(EI/rhoAL^4)
+		const int n = 12; const double L = 3000.0;
+		FrameModel m; fixtures::cantileverBeamN(m, n, L, mat, sec);
+		PreparedSystem ps = assembleAndFactor(m);
+		const ModalResult mr = solveModal(ps, ModalOptions{});
+		const double b1 = 1.8751040687;
+		const double w1ex = b1 * b1 * FMath::Sqrt(E * sec.Iz / (rhoC * sec.A * L * L * L * L));
+		TestTrue(TEXT("cantilever omega1 within 1%"), FMath::Abs(mr.modes[0].omega - w1ex) < 0.01 * w1ex);
+	}
 	return true;
 }
 

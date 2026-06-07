@@ -110,6 +110,31 @@ Mat12 transform12(const Mat3& R) {
     return T;
 }
 
+Mat12 localMass12(real rho, real A, real Iy, real Iz, real L) {
+    Mat12 m = Mat12::Zero();
+    const real L2 = L * L;
+    const real ma = rho * A * L / 6.0;          // axial / torsion lumping factor
+    const real mt = rho * (Iy + Iz) * L / 6.0;  // torsion uses the polar inertia Ip = Iy + Iz
+    const real mb = rho * A * L / 420.0;        // bending consistent-mass factor
+
+    // axial (u1=0, u2=6)
+    m(0,0) = 2*ma; m(0,6) = ma;  m(6,0) = ma;  m(6,6) = 2*ma;
+    // torsion (rx1=3, rx2=9)
+    m(3,3) = 2*mt; m(3,9) = mt;  m(9,3) = mt;  m(9,9) = 2*mt;
+    // bending about local z, x-y plane (v=1,7 ; rz=5,11) — canonical signs
+    m(1,1)=156*mb;    m(1,5)=22*L*mb;   m(1,7)=54*mb;     m(1,11)=-13*L*mb;
+    m(5,1)=22*L*mb;   m(5,5)=4*L2*mb;   m(5,7)=13*L*mb;   m(5,11)=-3*L2*mb;
+    m(7,1)=54*mb;     m(7,5)=13*L*mb;   m(7,7)=156*mb;    m(7,11)=-22*L*mb;
+    m(11,1)=-13*L*mb; m(11,5)=-3*L2*mb; m(11,7)=-22*L*mb; m(11,11)=4*L2*mb;
+    // bending about local y, x-z plane (w=2,8 ; ry=4,10) — L-terms sign-flipped (mirror stiffness)
+    m(2,2)=156*mb;    m(2,4)=-22*L*mb;  m(2,8)=54*mb;     m(2,10)=13*L*mb;
+    m(4,2)=-22*L*mb;  m(4,4)=4*L2*mb;   m(4,8)=-13*L*mb;  m(4,10)=-3*L2*mb;
+    m(8,2)=54*mb;     m(8,4)=-13*L*mb;  m(8,8)=156*mb;    m(8,10)=22*L*mb;
+    m(10,2)=13*L*mb;  m(10,4)=-3*L2*mb; m(10,8)=22*L*mb;  m(10,10)=4*L2*mb;
+
+    return m;
+}
+
 bool condenseReleases(Mat12& kl, Vec12& Qf, const std::array<bool, 12>& release) {
     int cidx[12]; int nc = 0;
     for (int i = 0; i < 12; ++i) if (release[i]) cidx[nc++] = i;
