@@ -28,6 +28,10 @@ struct Capacity {
 struct Material {
     real     E   = 0;     // Young's modulus (MPa)
     real     G   = 0;     // shear modulus (MPa)
+    real     nu  = 0;     // Poisson ratio — used by the shell plane-stress/bending
+                          // constitutive (Dm, Db). Beams use E,G directly and ignore
+                          // nu, so this defaults to 0 and leaves existing fixtures
+                          // (which never set it) byte-for-byte unchanged.
     real     rho = 0;     // density (kg/m^3) — informational this milestone
     Capacity cap;
 

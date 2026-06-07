@@ -4,6 +4,7 @@
 #include "FrameCore/Material.h"
 #include "FrameCore/Section.h"
 #include "FrameCore/Load.h"
+#include "FrameCore/Shell.h"
 #include <vector>
 #include <string>
 
@@ -15,10 +16,12 @@ namespace frame {
 struct FrameModel {
     std::vector<Node>            nodes;
     std::vector<Member>          members;
+    std::vector<ShellQuad>       shells;        // MITC4 flat-shell facets (parallel to members)
     std::vector<Material>        materials;   // optional storage to keep refs alive
     std::vector<Section>         sections;    // optional storage to keep refs alive
     std::vector<NodalLoad>       nodalLoads;
     std::vector<MemberUDL>       memberUDLs;
+    std::vector<ShellPressure>   shellPressures;
 
     int dofCount() const { return DOF_PER_NODE * static_cast<int>(nodes.size()); }
 

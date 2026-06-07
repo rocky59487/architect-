@@ -321,6 +321,221 @@ int main() {
                   std::fabs(d12 - d8) < 0.02 * d8, "d8=" + std::to_string(d8) + " d12=" + std::to_string(d12));
     }
 
+    // ---------- F13: MITC4 shell — plate bending (Reissner-Mindlin + assumed shear) ----------
+    {
+        const real Es = 30000.0, nu = 0.3, Gs = Es / (2.0 * (1.0 + nu));
+        Material smat(Es, Gs); smat.nu = nu;
+        std::printf("[F13] MITC4 shell plate bending  (E=%.0f nu=%.1f)\n", Es, nu);
+
+        // (a) simply-supported square plate under uniform pressure -> Kirchhoff w_c.
+        const real a = 1000.0, t = 10.0, q = 0.01;
+        const real D  = Es * t * t * t / (12.0 * (1.0 - nu * nu));
+        const real wc = 0.00406 * q * a * a * a * a / D;
+        auto centerW = [&](int n) -> real {
+            FrameModel m; fixtures::squarePlateShell(m, a, t, n, q, smat);
+            const SolveResult r = solve(m);
+            if (r.singular) return 1e30;
+            const int c = (n / 2) * (n + 1) + (n / 2);   // node(n/2,n/2)
+            return std::fabs(r.disp(c, Uz));
+        };
+        {
+            FrameModel m; fixtures::squarePlateShell(m, a, t, 8, q, smat);
+            const SolveResult r = solve(m);
+            checkTrue("plate builds non-singular", !r.singular, r.diagnostic);
+        }
+        const real w4 = centerW(4), w8 = centerW(8), w16 = centerW(16);
+        const real e4 = relErr(w4, wc), e8 = relErr(w8, wc), e16 = relErr(w16, wc);
+        std::printf("   simply-supported square  plate w_c=%.6g mm\n", wc);
+        std::printf("   N=4 w=%.5g (err %.2f%%)  N=8 w=%.5g (err %.2f%%)  N=16 w=%.5g (err %.2f%%)\n",
+                    w4, 100 * e4, w8, 100 * e8, w16, 100 * e16);
+        checkTrue("plate converges to Kirchhoff (N=16 within 2%)", e16 < 0.02,
+                  "e16=" + std::to_string(e16));
+        checkTrue("plate mesh-converging (e16 < e4)", e16 < e4,
+                  "e4=" + std::to_string(e4) + " e16=" + std::to_string(e16));
+
+        // (b) no shear locking: a very thin plate (t/a = 0.001) must NOT lock (a locked
+        // element would read far too stiff -> deflection far below theory).
+        {
+            const real tThin = 1.0;
+            const real Dt  = Es * tThin * tThin * tThin / (12.0 * (1.0 - nu * nu));
+            const real wcT = 0.00406 * q * a * a * a * a / Dt;
+            FrameModel m; fixtures::squarePlateShell(m, a, tThin, 16, q, smat);
+            const SolveResult r = solve(m);
+            const int c = 8 * (16 + 1) + 8;
+            const real wT = r.singular ? 1e30 : std::fabs(r.disp(c, Uz));
+            const real eT = relErr(wT, wcT);
+            std::printf("   thin plate t/a=0.001  w=%.6g exp=%.6g (err %.2f%%)\n", wT, wcT, 100 * eT);
+            checkTrue("thin plate not shear-locked (N=16 within 3%)", eT < 0.03,
+                      "eThin=" + std::to_string(eT));
+        }
+
+        // (c) constant-curvature patch test (cylindrical bending). MITC4 reproduces the
+        // exact constant moment to MACHINE PRECISION on regular AND parallelogram meshes.
+        for (const real skew : { 0.0, 0.4 }) {
+            const real ap = 1000.0, tp = 10.0, cc = 1e-6;
+            const real Dfac = Es * tp * tp * tp / (12.0 * (1.0 - nu * nu));
+            FrameModel m; fixtures::platePatchCylindrical(m, ap, tp, skew, cc, smat);
+            const SolveResult r = solve(m);
+            const char* tag = (skew == 0.0) ? "regular" : "parallelogram";
+            checkTrue("patch non-singular", !r.singular, r.diagnostic);
+            const real MxxExp = -Dfac * cc, MyyExp = -nu * Dfac * cc;
+            const real scale = std::fabs(MxxExp);
+            real eMxx = 0, eMyy = 0, mMxy = 0, mQ = 0;
+            for (const auto& sf : r.shellForces) {
+                eMxx = std::max(eMxx, std::fabs(sf.Mxx - MxxExp));
+                eMyy = std::max(eMyy, std::fabs(sf.Myy - MyyExp));
+                mMxy = std::max(mMxy, std::fabs(sf.Mxy));
+                mQ   = std::max(mQ, std::max(std::fabs(sf.Qx), std::fabs(sf.Qy)));
+            }
+            std::printf("   patch (%-13s) Mxx_exp=%.6g  max|dMxx|=%.2e |dMyy|=%.2e |Mxy|=%.2e |Q|=%.2e\n",
+                        tag, MxxExp, eMxx, eMyy, mMxy, mQ);
+            checkTrue("patch Mxx = -D c (constant)", eMxx < 1e-8 * scale, "eMxx=" + std::to_string(eMxx));
+            checkTrue("patch Myy = -nu D c (constant)", eMyy < 1e-8 * scale, "eMyy=" + std::to_string(eMyy));
+            checkTrue("patch Mxy ~ 0", mMxy < 1e-8 * scale, "mMxy=" + std::to_string(mMxy));
+            checkTrue("patch shear ~ 0 (pure bending)", mQ < 1e-6 * scale, "mQ=" + std::to_string(mQ));
+        }
+    }
+
+    // ---------- F14: MITC4 shell — membrane + drilling + 3D facet rotation ----------
+    {
+        const real Es = 30000.0, nu = 0.3, Gs = Es / (2.0 * (1.0 + nu));
+        Material smat(Es, Gs); smat.nu = nu;
+        std::printf("[F14] MITC4 shell membrane + drilling + 3D facet\n");
+
+        // (a) membrane constant-strain patch (regular + parallelogram) -> constant N.
+        for (const real skew : { 0.0, 0.4 }) {
+            const real a = 1000.0, t = 10.0, gx = 1e-4;
+            const real f = Es / (1.0 - nu * nu);
+            FrameModel m; fixtures::membranePatch(m, a, t, skew, gx, smat);
+            const SolveResult r = solve(m);
+            const char* tag = (skew == 0.0) ? "regular" : "parallelogram";
+            checkTrue("membrane patch non-singular", !r.singular, r.diagnostic);
+            const real NxxExp = t * f * gx, NyyExp = nu * NxxExp;
+            const real scale = std::fabs(NxxExp);
+            real eNxx = 0, eNyy = 0, mNxy = 0;
+            for (const auto& sf : r.shellForces) {
+                eNxx = std::max(eNxx, std::fabs(sf.Nxx - NxxExp));
+                eNyy = std::max(eNyy, std::fabs(sf.Nyy - NyyExp));
+                mNxy = std::max(mNxy, std::fabs(sf.Nxy));
+            }
+            std::printf("   membrane patch (%-13s) Nxx_exp=%.6g max|dNxx|=%.2e |dNyy|=%.2e |Nxy|=%.2e\n",
+                        tag, NxxExp, eNxx, eNyy, mNxy);
+            checkTrue("membrane patch Nxx constant", eNxx < 1e-8 * scale, "eNxx=" + std::to_string(eNxx));
+            checkTrue("membrane patch Nyy = nu Nxx", eNyy < 1e-8 * scale, "eNyy=" + std::to_string(eNyy));
+            checkTrue("membrane patch Nxy ~ 0", mNxy < 1e-8 * scale, "mNxy=" + std::to_string(mNxy));
+        }
+
+        // (b) drilling gate: a FLAT clamped plate with interior in-plane + drilling DOFs
+        // all free must solve NON-SINGULAR (the drilling stiffness removed the coplanar
+        // Rz zero-energy mode) and match clamped-plate theory w_c = 0.00126 q a^4 / D.
+        {
+            const real a = 1000.0, t = 10.0, q = 0.01;
+            const real D = Es * t * t * t / (12.0 * (1.0 - nu * nu));
+            const real wcC = 0.00126 * q * a * a * a * a / D;
+            FrameModel m; fixtures::clampedPlateShell(m, a, t, 16, q, smat);
+            const SolveResult r = solve(m);
+            checkTrue("flat clamped shell NON-singular (drilling gate)", !r.singular, r.diagnostic);
+            const int c = 8 * (16 + 1) + 8;
+            const real wC = r.singular ? 1e30 : std::fabs(r.disp(c, Uz));
+            const real eC = relErr(wC, wcC);
+            std::printf("   clamped plate w=%.6g exp=%.6g (err %.2f%%)\n", wC, wcC, 100 * eC);
+            checkTrue("clamped plate within 3% of theory", eC < 0.03, "eC=" + std::to_string(eC));
+        }
+
+        // (c) rotation invariance: solve a flat clamped plate, then the SAME model rigidly
+        // rotated to an arbitrary 3D orientation. The pressure follows the facet normal and
+        // an encastre boundary is frame-invariant, so |displacement| at the centre is preserved.
+        {
+            const real a = 1000.0, t = 10.0, q = 0.01;
+            const int n = 12, c = (n / 2) * (n + 1) + (n / 2);
+            FrameModel m0; fixtures::clampedPlateShell(m0, a, t, n, q, smat);
+            const SolveResult r0 = solve(m0);
+            const real d0 = std::sqrt(r0.disp(c, Ux) * r0.disp(c, Ux) +
+                                      r0.disp(c, Uy) * r0.disp(c, Uy) +
+                                      r0.disp(c, Uz) * r0.disp(c, Uz));
+            // Rodrigues rotation about a normalized arbitrary axis.
+            const real ax = 1, ay = 2, az = 3, an = std::sqrt(14.0);
+            const real kx = ax / an, ky = ay / an, kz = az / an, th = 0.9;
+            const real ct = std::cos(th), st = std::sin(th), vt = 1 - ct;
+            const real R[3][3] = {
+                { ct + kx * kx * vt,      kx * ky * vt - kz * st, kx * kz * vt + ky * st },
+                { ky * kx * vt + kz * st, ct + ky * ky * vt,      ky * kz * vt - kx * st },
+                { kz * kx * vt - ky * st, kz * ky * vt + kx * st, ct + kz * kz * vt }
+            };
+            FrameModel m1; fixtures::clampedPlateShell(m1, a, t, n, q, smat);
+            fixtures::rotateModelRigid(m1, R);
+            const SolveResult r1 = solve(m1);
+            checkTrue("rotated shell non-singular", !r1.singular, r1.diagnostic);
+            const real d1 = std::sqrt(r1.disp(c, Ux) * r1.disp(c, Ux) +
+                                      r1.disp(c, Uy) * r1.disp(c, Uy) +
+                                      r1.disp(c, Uz) * r1.disp(c, Uz));
+            std::printf("   |u_centre| flat=%.6g rotated=%.6g\n", d0, d1);
+            checkClose("|u_centre| invariant under 3D rotation", d1, d0, 1e-9);
+        }
+    }
+
+    // ---------- F15: MITC4 shell — Scordelis-Lo roof (curved-surface benchmark) ----------
+    {
+        const real kPi = 3.14159265358979323846;
+        const real R = 25.0, L = 50.0, phi0 = 40.0 * kPi / 180.0, t = 0.25, g = 90.0;
+        const real Er = 4.32e8, nur = 0.0, Gr = Er / 2.0;
+        Material rmat(Er, Gr); rmat.nu = nur;
+        const real ref = 0.3024;                          // MacNeal-Harder reference
+        std::printf("[F15] MITC4 Scordelis-Lo roof  (ref free-edge w=%.4f)\n", ref);
+        auto edgeW = [&](int n) -> real {
+            FrameModel m; fixtures::scordelisLoRoof(m, R, L, phi0, t, g, n, n, rmat);
+            const SolveResult r = solve(m);
+            if (r.singular) return 1e30;
+            const int c = n * (n + 1) + n;                // gid(nf=n, ny=n): free-edge midspan
+            return std::fabs(r.disp(c, Uz));
+        };
+        {
+            FrameModel m; fixtures::scordelisLoRoof(m, R, L, phi0, t, g, 8, 8, rmat);
+            const SolveResult r = solve(m);
+            checkTrue("roof builds non-singular", !r.singular, r.diagnostic);
+        }
+        const real w8 = edgeW(8), w16 = edgeW(16), w24 = edgeW(24);
+        const real e8 = relErr(w8, ref), e16 = relErr(w16, ref), e24 = relErr(w24, ref);
+        std::printf("   N=8 w=%.5g (err %.2f%%)  N=16 w=%.5g (err %.2f%%)  N=24 w=%.5g (err %.2f%%)\n",
+                    w8, 100 * e8, w16, 100 * e16, w24, 100 * e24);
+        checkTrue("roof converges to reference (N=24 within 3%)", e24 < 0.03,
+                  "e24=" + std::to_string(e24));
+        checkTrue("roof mesh-converging (e24 < e8)", e24 < e8,
+                  "e8=" + std::to_string(e8) + " e24=" + std::to_string(e24));
+    }
+
+    // ---------- F16: MITC4 shell — pinched cylinder (hard inextensional benchmark) ----------
+    {
+        const real R = 300.0, L = 600.0, t = 3.0, P = 1.0;
+        const real Ec = 3.0e6, nuc = 0.3, Gc = Ec / (2.0 * (1.0 + nuc));
+        Material cmat(Ec, Gc); cmat.nu = nuc;
+        const real ref = 1.8248e-5;                       // analytic radial deflection under load
+        std::printf("[F16] MITC4 pinched cylinder  (ref under-load w=%.4e)\n", ref);
+        auto loadW = [&](int n) -> real {
+            FrameModel m; fixtures::pinchedCylinder(m, R, L, t, P, n, n, cmat);
+            const SolveResult r = solve(m);
+            if (r.singular) return 0.0;
+            const int c = n * (n + 1) + 0;                // gid(0, nz=n): load node
+            return std::fabs(r.disp(c, Ux));
+        };
+        {
+            FrameModel m; fixtures::pinchedCylinder(m, R, L, t, P, 8, 8, cmat);
+            const SolveResult r = solve(m);
+            checkTrue("cylinder builds non-singular", !r.singular, r.diagnostic);
+        }
+        const real w8 = loadW(8), w16 = loadW(16), w24 = loadW(24), w32 = loadW(32);
+        std::printf("   N=8 %.5e (%.1f%%)  N=16 %.5e (%.1f%%)  N=24 %.5e (%.1f%%)  N=32 %.5e (%.1f%%)\n",
+                    w8, 100 * w8 / ref, w16, 100 * w16 / ref, w24, 100 * w24 / ref, w32, 100 * w32 / ref);
+        // Converges from below toward the reference; require monotone approach and a
+        // reasonable fraction at the finest mesh (flat-facet MITC4 is slow on this test).
+        checkTrue("cylinder converging upward (w32 > w16 > w8)", w32 > w16 && w16 > w8,
+                  "w8=" + std::to_string(w8) + " w16=" + std::to_string(w16) + " w32=" + std::to_string(w32));
+        checkTrue("cylinder N=32 reaches >= 90% of reference", w32 >= 0.90 * ref,
+                  "ratio=" + std::to_string(w32 / ref));
+        checkTrue("cylinder N=32 not over-stiff/over-soft (<= 105%)", w32 <= 1.05 * ref,
+                  "ratio=" + std::to_string(w32 / ref));
+    }
+
     std::printf("\n%s  (failures=%d)\n", g_fail == 0 ? "ALL PASS" : "FAILURES", g_fail);
     return g_fail == 0 ? 0 : 1;
 }

@@ -4,16 +4,18 @@ A self-contained **C++17 + Eigen** 3-D linear-elastic **beam-column finite-eleme
 It is the structural core of an "architect simulator" graduation project: you describe a
 frame (nodes, members, sections, supports, loads), and it returns nodal displacements,
 member end forces, support reactions, a **mechanism / instability** verdict, and an elastic
-**demand/capacity (D/C)** screen. It also includes a **grillage idealization** that
-approximates a continuous plate as a woven beam grid — the intended growth direction of the
-engine toward true continuous-surface (shell) elements.
+**demand/capacity (D/C)** screen. It also computes **continuous surfaces directly** with a
+**MITC4 Reissner–Mindlin flat-shell element** (membrane + plate bending + drilling), for true
+plate/shell analysis; a legacy **grillage idealization** (a woven beam grid) is retained as a
+cheap approximation alongside it.
 
 The engine is deliberately small, **rigorously validated**, and **engine-agnostic**: the
 public API uses only plain C++/POD types (no UE, no Eigen leakage), so the same source
 compiles as a standalone console gate *and* as an Unreal Engine module.
 
 > **Status:** clean, audited baseline. Verification gate is green
-> (`standalone ALL PASS` · `12 UE automation tests` · `OpenSees strict cross-validation PASS`).
+> (`standalone ALL PASS` · `16 UE automation tests` · `OpenSees strict cross-validation PASS`,
+> including same-element agreement with OpenSees `ShellMITC4` to ~1e-10).
 
 ---
 
@@ -29,7 +31,8 @@ compiles as a standalone console gate *and* as an Unreal Engine module.
 | **Mechanism / instability detection** | from the LDLᵀ factorization (near-zero / negative pivots), **not** from connectivity — refuses to report forces on an unstable model |
 | Member-end force / reaction recovery | local `{N,Vy,Vz,T,My,Mz}` at both ends; global reactions `R = K·u − F` |
 | **Elastic D/C screen** (`ElasticAllowable`) | combined axial + biaxial bending + transverse shear (peak-factored) + torsion vs allowable capacities; reports the governing failure mode |
-| **Grillage plate idealization** | a simply-supported isotropic plate → ν-inflated woven beam grid; the continuous-surface approximation |
+| **MITC4 flat-shell element** | 4-node Reissner–Mindlin facet: plane-stress membrane + plate bending with **MITC4 assumed transverse shear** (no shear locking) + Hughes–Brezzi **drilling**, assembled as 24 DOF and rotated into 3-D; recovers `{Mxx,Myy,Mxy,Qx,Qy,Nxx,Nyy,Nxy}` |
+| **Grillage plate idealization** | a simply-supported isotropic plate → ν-inflated woven beam grid; a cheaper beam-grid approximation kept alongside the shell |
 
 ### Scope boundaries (read this — the engine is honest about what it is *not*)
 
@@ -41,10 +44,16 @@ compiles as a standalone console gate *and* as an Unreal Engine module.
   ~2 % of Kirchhoff plate theory and is mesh-stable, but transverse bending moments are
   **over-estimated** (the grillage analogy trades the Poisson cross-moment for extra twist).
   It is an engineering idealization, not an exact plate solver.
+- The **MITC4 shell** is a **4-node bilinear flat facet**: curved surfaces are approximated by
+  flat panels, so there is a faceting error that vanishes under mesh refinement (the curved
+  benchmarks report the convergence). It reproduces constant curvature/strain **exactly** on
+  regular/parallelogram meshes; general (non-parallelogram) quadrilaterals show an O(h) patch
+  residual that converges away. The drilling DOF is a **Hughes–Brezzi** treatment (it makes a
+  coplanar shell non-singular and vanishes in constant-strain states, so it does not pollute
+  the patch tests). It is **linear-elastic, small-deformation**.
 - **No** dynamics, modal analysis, geometric nonlinearity (P-Δ / buckling), RC fiber-section
-  precision, plastic-collapse pushover, or true shell elements. (Earlier experimental layers
-  for these were removed in the cleanup to keep a small, fully-verified core; true
-  continuous-surface **shell elements** are the planned next step.)
+  precision, or plastic-collapse pushover. (Earlier experimental layers for these were removed
+  in the cleanup to keep a small, fully-verified core.)
 
 ---
 
@@ -83,13 +92,22 @@ Every capability is anchored to an **independent oracle**, not just a self-consi
   UDL `5wL⁴/384EI`, `wL²/8`, `wL/2`; propped-cantilever-via-release `5wL/8`, `3wL/8`, `wL²/8`;
   Timoshenko `PL³/3EI + PL/GAₛ`; circular `I = πr⁴/4`; quarter-circle arch convergence;
   grillage center deflection vs Kirchhoff plate theory.
+- **Shell oracles** — the MITC4 **patch test** (constant curvature *and* constant membrane
+  strain reproduced to machine precision on regular & parallelogram meshes); simply-supported
+  and clamped square plates vs Kirchhoff theory (~0.1–0.3 %); a thin-plate **no-shear-locking**
+  check; and the two MacNeal–Harder curved-shell benchmarks — **Scordelis-Lo roof** (0.83 % at
+  N=24) and **pinched cylinder** (98.8 % of the `1.8248e-5` reference at N=32, converging from
+  below). A flat-plate-with-free-drilling case is the **coplanar non-singular** gate.
 - **Rotation equivariance** — rotate the whole model by an arbitrary `R`; displacements must
   transform as `R·u` (catches transform / off-diagonal errors a norm-only check would miss).
+  The shell variant rotates a clamped plate into an arbitrary 3-D orientation and checks the
+  centre displacement magnitude is preserved (exercises the facet 3-D rotation).
 - **An independent dense Gaussian solver** inside the gate (not Eigen) cross-checks results
   where it matters.
 - **OpenSees** offline cross-validation (`Tools/opensees_compare.py`) — strict `1e-8` agreement
-  by default, `--relaxed` for cross-platform float drift. OpenSees is a **validation tool
-  only**; it is never shipped or linked into the engine.
+  by default for the beam models, `--relaxed` for cross-platform float drift. The MITC4 shell is
+  cross-checked against OpenSees' **own `ShellMITC4`** (the same element): node displacements
+  agree to **~1e-10**. OpenSees is a **validation tool only**; never shipped or linked.
 
 See **[`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md)** for the data model, solve pipeline, sign
 / unit / DOF conventions, and the element abstraction.
@@ -156,10 +174,13 @@ docs/ARCHITECTURE.md                    data model, solve pipeline, conventions
 
 ## Roadmap
 
-The current tree is a small, fully-verified linear-elastic core plus the grillage
-continuous-surface idealization. The next major step is **true continuous-surface (shell)
-elements** (e.g. MITC4 Reissner–Mindlin) behind the existing `IElement` seam, so the engine can
-compute plates and shells directly rather than via the grillage beam-grid approximation.
+The continuous-surface goal is met: a **MITC4 Reissner–Mindlin flat-shell element** sits behind
+the existing `IElement` seam, so the engine computes plates and shells directly (cross-validated
+against OpenSees `ShellMITC4`). Possible next steps, in rough order of value: a **prescribed
+support-settlement** oracle (the math path exists but is not yet independently checked); a
+warping-aware / higher-order shell to cut the flat-facet error on strongly curved surfaces; and,
+further out, geometric nonlinearity (P-Δ / buckling), dynamics / modal analysis, or an RC
+fiber-section precision layer — each gated by its own independent oracle before being claimed.
 
 ## License / use
 

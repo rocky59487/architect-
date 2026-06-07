@@ -2,6 +2,7 @@
 #include "FrameEigen.h"
 #include "IElement.h"
 #include "BeamColumnElement.h"
+#include "MITC4ShellElement.h"
 
 #include <vector>
 #include <string>
@@ -29,12 +30,14 @@ SolveResult solve(const FrameModel& model, const SolveOptions& opts) {
     R.reactions.assign((size_t)N, 0.0);
 
     // ---- build the element list (seam #1). The solver no longer hard-codes the
-    // 12x12 beam: each member becomes a BeamColumnElement; future shells slot in
-    // behind the same IElement interface. ----
+    // 12x12 beam: each member becomes a BeamColumnElement, each shell facet a
+    // MITC4ShellElement; both slot in behind the same IElement interface. ----
     std::vector<std::unique_ptr<IElement>> elems;
-    elems.reserve(model.members.size());
+    elems.reserve(model.members.size() + model.shells.size());
     for (size_t e = 0; e < model.members.size(); ++e)
         elems.push_back(std::make_unique<BeamColumnElement>((int)e));
+    for (size_t s = 0; s < model.shells.size(); ++s)
+        elems.push_back(std::make_unique<MITC4ShellElement>((int)s));
 
     // ---- prepare each element: local stiffness + fixed-end forces + (optional)
     // member-end release condensation. An ill-posed release set (singular released
@@ -56,7 +59,9 @@ SolveResult solve(const FrameModel& model, const SolveOptions& opts) {
 
     // ---- assemble global stiffness K from each element's (possibly condensed) kl ----
     std::vector<Triplet> trips;
-    trips.reserve(elems.size() * 144);
+    size_t tripCap = 0;
+    for (const auto& el : elems) { const size_t d = (size_t)el->localDof(); tripCap += d * d; }
+    trips.reserve(tripCap);
     for (const auto& el : elems) el->assemble(trips);
 
     // ---- global load vector F: nodal loads + equivalent nodal loads from each element ----
@@ -154,8 +159,10 @@ SolveResult solve(const FrameModel& model, const SolveOptions& opts) {
     const VecX Rv = K * u - F;
     for (int g = 0; g < N; ++g) R.reactions[(size_t)g] = Rv(g);
 
-    // member end forces (local): each element recovers Q = k_local (T u_e) + Qf
+    // member/shell internal forces (local): each element recovers its own results
+    // (beams -> R.memberForces[memberIndex], shells -> R.shellForces[shellIndex]).
     R.memberForces.resize(model.members.size());
+    R.shellForces.resize(model.shells.size());
     for (const auto& el : elems) el->recover(u, R);
 
     return R;

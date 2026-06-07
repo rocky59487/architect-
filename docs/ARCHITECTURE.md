@@ -1,9 +1,9 @@
 # FrameCore — Architecture
 
-FrameCore is a 3-D linear-elastic direct-stiffness beam-column FEM. This document covers the
-conventions, data model, solve pipeline, element abstraction, strength screen, the grillage
-idealization, and the validation framework. See [`../README.md`](../README.md) for the
-high-level overview and scope boundaries.
+FrameCore is a 3-D linear-elastic direct-stiffness FEM with beam-column **and** MITC4 flat-shell
+elements. This document covers the conventions, data model, solve pipeline, element abstraction
+(beam + shell), strength screen, the grillage idealization, and the validation framework. See
+[`../README.md`](../README.md) for the high-level overview and scope boundaries.
 
 ---
 
@@ -29,47 +29,68 @@ high-level overview and scope boundaries.
 | Type | Holds |
 |---|---|
 | `Node` | `id`, position, `fixed[6]` (boundary mask), `prescribed[6]` (imposed support displacements); `fixAll()` |
-| `Material` | `E`, `G`, density, `Capacity{comp,tens,shear,bend=min(comp,tens),tors=shear}` (allowable stresses) |
+| `Material` | `E`, `G`, **`nu`** (Poisson, used by the shell constitutive; beams ignore it), density, `Capacity{comp,tens,shear,bend=min(comp,tens),tors=shear}` (allowable stresses) |
 | `Section` | `A, Iy, Iz, J, cy, cz, Asy, Asz, shape`; section moduli `Wy()=Iy/cy`, `Wz()=Iz/cz`; factories `Rectangular(b,d)` and `Circular(r)` (Iy=Iz=πr⁴/4, J=2I); the factories also set the Timoshenko shear areas `Asy/Asz` |
 | `Member` | `id`, end node ids `i,j`, `const Material*`, `const Section*`, `refVec`, `release[12]` |
+| `ShellQuad` | `id`, 4 corner node ids `n[4]` (CCW about +normal), `const Material*` (needs `nu`), thickness `t` — a MITC4 flat-shell facet |
 | `NodalLoad` | node id + 6-component global force/moment |
 | `MemberUDL` | member id + local distributed load `w_local` (force/length) |
-| `FrameModel` | vectors of the above + `materials`/`sections` storage (keeps the pointers alive) + `validate()` + `dofCount()` |
+| `ShellPressure` | shell id + transverse pressure `p` (along the facet normal) |
+| `ShellElementForces` | per-shell stress resultants in the facet frame: `{Mxx,Myy,Mxy,Qx,Qy,Nxx,Nyy,Nxy}` (in `SolveResult.shellForces`) |
+| `FrameModel` | vectors of the above (`members` **and** `shells` are parallel element sources) + `materials`/`sections` storage (keeps the pointers alive) + `validate()` + `dofCount()` |
 
 **Pointer-lifetime invariant.** `Member` captures raw `const Material*`/`const Section*` into
 `FrameModel::materials`/`sections`. Those vectors must be `reserve()`-d to their final size and
 fully populated *before* any `Member` captures a pointer; otherwise a `push_back` reallocation
 dangles every captured pointer. The fixtures and builders all follow "reserve → push → capture".
 
-**`validate()`** rejects: no nodes/members, a member referencing a missing node, identical or
-coincident endpoints, null material/section, non-positive `E/G` or `A/Iy/Iz/J`, and — after the
-audit — **loads referencing a missing node or member** (these would otherwise be silently
-dropped by the solver, yielding a quietly under-loaded "successful" solve).
+**`validate()`** rejects: no nodes, *no members **and** no shells*, a member referencing a missing
+node, identical or coincident endpoints, null material/section, non-positive `E/G` or `A/Iy/Iz/J`;
+for shells — a missing/duplicate corner node, null material, `nu ∉ [0,0.5)`, non-positive
+thickness, a degenerate (zero-area) quad; and — after the audit — **loads (nodal, UDL, pressure)
+referencing a missing node / member / shell** (these would otherwise be silently dropped by the
+solver, yielding a quietly under-loaded "successful" solve).
 
 ---
 
 ## 3. Element abstraction (`IElement` seam)
 
-The solver iterates over an `IElement` interface, not a hard-coded beam, so new element types
-(e.g. future shells) drop in behind the same seam:
+The solver iterates over an `IElement` interface, not a hard-coded beam, so different element
+types drop in behind the same seam (the solver assembles, applies BCs, factorizes, and recovers
+the same way for every element — only `localDof()` differs):
 
 ```
 struct IElement {
-  int  dofCount();
-  void globalDofs(model, out);
-  void assembleStiffness(model, opts, triplets);   // scatter k_global into the global K
-  void fixedEndForces(model, opts, globalF);        // scatter element loads (FEF) into F
-  bool condense(opts, why);                          // e.g. release static condensation
-  void recoverEndForces(model, u, out);              // local {N,Vy,Vz,T,My,Mz} at both ends
+  int  localDof();                                   // 12 for a beam, 24 for a shell facet
+  bool prepare(model, opts, why);                    // build local k + loads; condense releases
+  void assemble(triplets);                           // scatter Tᵀ k_local T into the global K
+  void addEquivalentNodalLoads(globalF);             // scatter element loads into F
+  void recover(u, result);                           // element internal forces -> SolveResult
 };
 ```
 
-`BeamColumnElement` is the only implementation today. Its local stiffness `localStiffness12`
-is the textbook 12×12: axial `EA/L`; bending `12EI/L³, 6EI/L², 4EI/L, 2EI/L` in both planes
-(the *y*-block carries sign flips relative to the *z*-block); torsion `GJ/L`. The transform is
-`T = diag(R,R,R,R)` and `k_global = Tᵀ k_local T`. The optional Timoshenko variant scales the
-bending block by `1/(1+Φ)` with `Φ = 12EI/(G·Aₛ·L²)` per plane and reduces to Euler–Bernoulli
-as `Φ → 0`.
+**`BeamColumnElement`** (12 DOF). Local stiffness `localStiffness12` is the textbook 12×12: axial
+`EA/L`; bending `12EI/L³, 6EI/L², 4EI/L, 2EI/L` in both planes (the *y*-block carries sign flips
+relative to the *z*-block); torsion `GJ/L`. The transform is `T = diag(R,R,R,R)` and
+`k_global = Tᵀ k_local T`. The optional Timoshenko variant scales the bending block by `1/(1+Φ)`
+with `Φ = 12EI/(G·Aₛ·L²)` per plane and reduces to Euler–Bernoulli as `Φ → 0`.
+
+**`MITC4ShellElement`** (24 DOF = 4 nodes × 6). A flat Reissner–Mindlin facet built from three
+blocks, each integrated 2×2 Gauss and mapped into the node DOFs `[Ux,Uy,Uz,Rx,Ry,Rz]`:
+
+- **Plate bending** (fiber rotations `w, βx, βy`): `Kb = ∫ Bbᵀ Db Bb`, with the MITC4
+  **assumed natural transverse shear** (Bathe–Dvorkin) — covariant shears sampled at the four
+  edge-midpoint *tying points* and interpolated, which defeats shear locking in the thin limit.
+  Fiber rotations map to the nodal rotations by `βx = Ry`, `βy = −Rx`, `w = Uz`.
+- **Membrane** (plane stress `u, v`): `Km = ∫ t Bmᵀ Dm Bm`.
+- **Drilling** (`Rz`): a **Hughes–Brezzi** penalty `∫ γ (θz − ½(v,x − u,y))²`, `γ = G·t`. It gives
+  the in-plane rotation real stiffness — removing the coplanar `Rz` zero-energy mode that the
+  LDLᵀ mechanism check would otherwise (correctly) flag singular — yet vanishes in constant-strain
+  states, so it does not pollute the patch tests.
+
+The facet's local frame is built from the corner geometry (`e1,e2` in-plane, `n` the averaged
+normal); `T = diag(R,…)` (eight 3×3 blocks) rotates the 24-DOF local stiffness into 3-D, exactly
+as for the beam. `recover` returns the centre stress resultants `{Mxx,Myy,Mxy,Qx,Qy,Nxx,Nyy,Nxy}`.
 
 **End releases.** With `SolveOptions.enableReleases`, a member's released local DOFs `c` are
 statically condensed out of the retained set `r`: `k* = k_rr − k_rc k_cc⁻¹ k_cr` **and**
@@ -84,8 +105,8 @@ rank-revealing factorization and reported as singular with a diagnostic, never a
 
 ```
 validate(model)                      -> singular + diagnostic on failure
-build IElement per member
-assemble global F                    nodal loads + element fixed-end forces (scattered by Tᵀ)
+build IElement per member + shell    BeamColumnElement per member, MITC4ShellElement per shell
+assemble global F                    nodal loads + element equivalent/fixed-end loads (scattered by Tᵀ)
 assemble global K                    triplets -> SimplicialLDLT-friendly sparse matrix
 reduce to free DOFs                  drop fixed rows/cols; move prescribed (≠0) terms to the RHS
 SimplicialLDLT.compute(K_ff)
@@ -141,22 +162,28 @@ that.) Only out-of-plane action is physical, so in-plane DOFs `(Ux,Uy,Rz)` are l
 node. Node index `node(i,j) = j·(nx+1) + i`. The uniform pressure is lumped to consistent nodal
 loads, so total applied load equals `q·a·b` exactly (a load-conservation oracle). **Accuracy:**
 center deflection within ~2 % of plate theory and mesh-stable; transverse moments
-over-estimated. This is the engine's bridge toward true shell elements.
+over-estimated. It is kept as a cheap approximation alongside the MITC4 shell (§3), which solves
+plates/shells directly and converges to the exact solution.
 
 ---
 
 ## 7. Validation framework
 
-- **`Private/FrameTestFixtures.h`** — pure-`frame` fixture builders (cantilever, simply
-  supported, mechanism, axial column, propped-cantilever-via-release, torsion-release
-  mechanism, circular arch). Shared by both the standalone gate and the UE automation tests, so
-  a green standalone run exercises the *same* solver path UE compiles.
-- **`Standalone/main.cpp`** — F1…F12 fixtures vs closed-form oracles (see README §validation),
-  printing `[PASS]/[FAIL]` and `ALL PASS (failures=n)`.
+- **`Private/FrameTestFixtures.h`** — pure-`frame` fixture builders (beams: cantilever, simply
+  supported, mechanism, axial column, propped-cantilever-via-release, torsion-release mechanism,
+  circular arch; shells: square/clamped plate, plate & membrane patch, Scordelis-Lo roof, pinched
+  cylinder, rigid model rotation). Shared by both the standalone gate and the UE automation tests,
+  so a green standalone run exercises the *same* solver path UE compiles.
+- **`Standalone/main.cpp`** — F1…F16 fixtures vs closed-form oracles, benchmark references, and
+  patch tests (see README §validation), printing `[PASS]/[FAIL]` and `ALL PASS (failures=n)`.
+  F13–F16 cover the MITC4 shell (plate bending, membrane+drilling, Scordelis-Lo, pinched cylinder).
 - **`Standalone/frame_cli.cpp`** — a stdin/stdout solver driver used by the Python validation
-  tools (it parses a model, solves, prints displacements + member forces).
-- **`Private/Tests/*.cpp`** — UE automation mirrors (`FrameCore.*`), 12 tests, same oracles.
-- **`Tools/`** — `opensees_compare.py` (OpenSees cross-validation, strict 1e-8 / `--relaxed`),
+  tools (parses a model incl. `SMAT/SHELL/SPRESS`, solves, prints displacements + member/shell
+  forces).
+- **`Private/Tests/*.cpp`** — UE automation mirrors (`FrameCore.*`), **16** tests (incl. four
+  `FrameCore.Shell.*`), same oracles.
+- **`Tools/`** — `opensees_compare.py` (OpenSees cross-validation: beams strict 1e-8; the MITC4
+  shell vs OpenSees' own `ShellMITC4` to ~1e-10; `--relaxed` for cross-platform drift),
   `independent_precision_audit.py`, `complex_structure_benchmark.py`, `grillage_curve_audit.py`
   — all black-box the engine through `frame_cli.exe`.
 - **`Scripts/run_gate.ps1`** — runs all three legs and prints a combined verdict + exit code

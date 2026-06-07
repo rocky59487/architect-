@@ -243,6 +243,104 @@ def model_portal_rc():
                 nodes=nodes, members=members, nloads=nloads, analytic=None)
 
 
+# ----------------------------------------------------------------- shells (MITC4)
+def run_frame_cli_shell(model):
+    lines = []
+    for m in model["smats"]:
+        lines.append(f"SMAT {m['E']} {m['nu']} {m['G']}")
+    for n in model["nodes"]:
+        f = n["fix"]
+        lines.append("NODE {id} {x} {y} {z} {0} {1} {2} {3} {4} {5}".format(*f, **n))
+    for s in model["shells"]:
+        nn = s["n"]
+        lines.append(f"SHELL {s['id']} {nn[0]} {nn[1]} {nn[2]} {nn[3]} {s['mat']} {s['t']}")
+    for l in model.get("nloads", []):
+        c = l["comp"]
+        lines.append(f"NLOAD {l['node']} {c[0]} {c[1]} {c[2]} {c[3]} {c[4]} {c[5]}")
+    lines.append("END")
+    p = subprocess.run([CLI], input="\n".join(lines) + "\n", capture_output=True, text=True)
+    if p.returncode != 0:
+        raise RuntimeError("frame_cli failed: " + p.stderr)
+    disp, singular = {}, None
+    for ln in p.stdout.splitlines():
+        t = ln.split()
+        if not t:
+            continue
+        if t[0] == "SINGULAR":
+            singular = int(t[1])
+        elif t[0] == "DISP":
+            disp[int(t[1])] = [float(x) for x in t[2:8]]
+    return singular, disp
+
+
+def run_opensees_shell(model):
+    # ShellMITC4 + ElasticMembranePlateSection IS the isotropic Reissner-Mindlin MITC4
+    # shell — the SAME element we implement — so node displacements must agree closely.
+    ops.wipe()
+    ops.model("basic", "-ndm", 3, "-ndf", 6)
+    for n in model["nodes"]:
+        ops.node(n["id"], float(n["x"]), float(n["y"]), float(n["z"]))
+        ops.fix(n["id"], *[int(x) for x in n["fix"]])
+    for s in model["shells"]:
+        m = model["smats"][s["mat"]]
+        secTag = s["id"] + 1
+        ops.section("ElasticMembranePlateSection", secTag, m["E"], m["nu"], s["t"], 0.0)
+        nn = s["n"]
+        ops.element("ShellMITC4", s["id"] + 1, nn[0], nn[1], nn[2], nn[3], secTag)
+    ops.timeSeries("Linear", 1)
+    ops.pattern("Plain", 1, 1)
+    for l in model.get("nloads", []):
+        ops.load(l["node"], *[float(x) for x in l["comp"]])
+    ops.constraints("Transformation")
+    ops.numberer("RCM")
+    ops.system("BandGeneral")
+    ops.test("NormDispIncr", 1.0e-12, 100)
+    ops.algorithm("Linear")
+    ops.integrator("LoadControl", 1.0)
+    ops.analysis("Static")
+    ok = ops.analyze(1)
+    disp = {n["id"]: [ops.nodeDisp(n["id"], k) for k in range(1, 7)] for n in model["nodes"]}
+    return ok, disp
+
+
+def shell_plate_model(name, nx, ny, Lx, Ly, t, E, nu, tilt_deg, Fz_total):
+    """Cantilever plate clamped along the x=0 edge, point loads (global Fz_total split
+    over the free-edge nodes). `tilt_deg` rigidly rotates the whole plate about global Y,
+    so a non-zero tilt exercises the 3D facet rotation AND couples membrane+bending — the
+    same global load is fed to both solvers, so the comparison stays valid."""
+    G = E / (2.0 * (1.0 + nu))
+    th = math.radians(tilt_deg)
+    c, s = math.cos(th), math.sin(th)
+    idx = lambda i, j: j * (nx + 1) + i
+    nodes = []
+    for j in range(ny + 1):
+        for i in range(nx + 1):
+            x0, y0, z0 = Lx * i / nx, Ly * j / ny, 0.0
+            x = c * x0 + s * z0
+            z = -s * x0 + c * z0
+            fix = [1, 1, 1, 1, 1, 1] if i == 0 else [0, 0, 0, 0, 0, 0]
+            nodes.append(dict(id=idx(i, j), x=x, y=y0, z=z, fix=fix))
+    shells = []
+    sid = 0
+    for j in range(ny):
+        for i in range(nx):
+            shells.append(dict(id=sid, n=[idx(i, j), idx(i + 1, j), idx(i + 1, j + 1), idx(i, j + 1)],
+                               mat=0, t=t))
+            sid += 1
+    nedge = ny + 1
+    nloads = [dict(node=idx(nx, j), comp=[0, 0, Fz_total / nedge, 0, 0, 0]) for j in range(ny + 1)]
+    return dict(name=name, smats=[dict(E=E, nu=nu, G=G)], nodes=nodes, shells=shells, nloads=nloads)
+
+
+def shell_models():
+    return [
+        shell_plate_model("shell cantilever plate (flat)", 8, 4, 1000.0, 500.0, 10.0,
+                          30000.0, 0.3, 0.0, -100.0),
+        shell_plate_model("shell cantilever plate (tilted 30deg, 3D + membrane)", 8, 4,
+                          1000.0, 500.0, 10.0, 30000.0, 0.3, 30.0, -100.0),
+    ]
+
+
 # ----------------------------------------------------------------- driver
 def main():
     if not os.path.exists(CLI):
@@ -258,8 +356,14 @@ def main():
     relaxed = ("--relaxed" in sys.argv)
     if relaxed:
         TOL_DISP_VS_OS, TOL_FORCE_VS_OS, TOL_VS_ANALYTIC = 1e-4, 1e-3, 2e-3
+        TOL_SHELL_VS_OS = 1e-3
     else:
         TOL_DISP_VS_OS, TOL_FORCE_VS_OS, TOL_VS_ANALYTIC = 1e-8, 1e-8, 1e-6
+        # Our flat-shell and OpenSees ShellMITC4 are the same element and agree on node
+        # displacements to ~1e-10 (membrane + MITC4 bending + drilling + 3D rotation all
+        # match). The 1e-7 gate leaves headroom for FP/OpenSees-version variation while
+        # still catching any real regression.
+        TOL_SHELL_VS_OS = 1e-7
     print(f"  tolerances: {'RELAXED (report)' if relaxed else 'STRICT (gate)'}  "
           f"disp={TOL_DISP_VS_OS:.0e} force={TOL_FORCE_VS_OS:.0e} analytic={TOL_VS_ANALYTIC:.0e}")
 
@@ -295,6 +399,24 @@ def main():
             print(f"  vs analytic: ours={mine:.6g} openSees={osv:.6g} exact={a['value']:.6g}")
             print(f"               relerr ours={em:.3e} openSees={eo:.3e}   {'PASS' if oka else 'FAIL'} (tol {TOL_VS_ANALYTIC:.0e})")
             failures += (0 if oka else 1)
+
+    # ---- MITC4 shell cross-validation vs OpenSees ShellMITC4 ----
+    print("\n" + "-" * 64)
+    print(" MITC4 shell vs OpenSees ShellMITC4")
+    print("-" * 64)
+    for M in shell_models():
+        sing, d_mine = run_frame_cli_shell(M)
+        ok_os, d_os = run_opensees_shell(M)
+        print(f"\n[{M['name']}]")
+        if sing or ok_os != 0:
+            print(f"  [FAIL] solve flagged singular (ours={sing}, openseesAnalyze={ok_os})")
+            failures += 1
+            continue
+        wd = compare_disp(d_mine, d_os)
+        okd = wd < TOL_SHELL_VS_OS
+        print(f"  disp diff (ours vs OpenSees ShellMITC4) = {wd:.3e}   "
+              f"{'PASS' if okd else 'FAIL'} (tol {TOL_SHELL_VS_OS:.0e})")
+        failures += (0 if okd else 1)
 
     print("\n" + "=" * 64)
     if failures == 0:
