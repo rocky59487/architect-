@@ -645,6 +645,50 @@ void testSolveLoadFingerprint() {
     }
 }
 
+void testShellCornerMoments() {
+    // D3 per-corner bending recovery: corner moments are EXACT on a constant-moment field (all
+    // equal the centre) and REVEAL the spread that the single centre value averages out on a
+    // varying field (so a design peak = max over corners, not the centre).
+    const real Es = 30000.0, nu = 0.3;
+    Material smat(Es, Es / (2.0 * (1.0 + nu))); smat.nu = nu;
+
+    {   // (a) constant-curvature patch -> every corner moment equals the centre
+        FrameModel m;
+        fixtures::platePatchCylindrical(m, 1000.0, 10.0, 0.0, 1e-6, smat);
+        const SolveResult r = solve(m);
+        real scale = 1e-30, maxDev = 0.0;
+        bool any = false;
+        for (const auto& sf : r.shellForces) {
+            any = true;
+            scale = std::max(scale, std::fabs(sf.Mxx));
+            for (int k = 0; k < 4; ++k) {
+                maxDev = std::max(maxDev, std::fabs(sf.MxxC[k] - sf.Mxx));
+                maxDev = std::max(maxDev, std::fabs(sf.MyyC[k] - sf.Myy));
+                maxDev = std::max(maxDev, std::fabs(sf.MxyC[k] - sf.Mxy));
+            }
+        }
+        const real rel = maxDev / scale;
+        addRow("Shell corner moments", "constant-moment field: corners == centre",
+               "patch test: |MxxC[k]-Mxx| ~ 0 on a constant-curvature field",
+               "max corner-vs-centre rel dev", rel, 1e-8, any && rel < 1e-8);
+    }
+    {   // (b) varying field -> corners spread around the centre (info the centre averages out)
+        FrameModel m;
+        fixtures::squarePlateShell(m, 2000.0, 50.0, 6, 0.01, smat);
+        const SolveResult r = solve(m);
+        real maxSpread = 0.0;
+        bool any = !r.singular && !r.shellForces.empty();
+        for (const auto& sf : r.shellForces) {
+            real hi = sf.MxxC[0], lo = sf.MxxC[0];
+            for (int k = 1; k < 4; ++k) { hi = std::max(hi, sf.MxxC[k]); lo = std::min(lo, sf.MxxC[k]); }
+            maxSpread = std::max(maxSpread, hi - lo);
+        }
+        addRow("Shell corner moments", "varying field: corners spread around centre",
+               "non-constant moment field has corner spread > 0 (peak != centre average)",
+               "max corner Mxx spread", maxSpread, 0.0, any && maxSpread > 0.0);
+    }
+}
+
 }  // namespace
 
 int main() {
@@ -662,6 +706,7 @@ int main() {
     testRectBiaxialDC();
     testMITC4SoftMode();
     testSolveLoadFingerprint();
+    testShellCornerMoments();
 
     int failures = 0;
     std::cout << "Linear-analysis deep audit (post F17-F25 strengthening)\n\n";

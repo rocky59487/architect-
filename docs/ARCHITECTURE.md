@@ -90,7 +90,17 @@ blocks, each integrated 2×2 Gauss and mapped into the node DOFs `[Ux,Uy,Uz,Rx,R
 
 The facet's local frame is built from the corner geometry (`e1,e2` in-plane, `n` the averaged
 normal); `T = diag(R,…)` (eight 3×3 blocks) rotates the 24-DOF local stiffness into 3-D, exactly
-as for the beam. `recover` returns the centre stress resultants `{Mxx,Myy,Mxy,Qx,Qy,Nxx,Nyy,Nxy}`.
+as for the beam. `recover` returns the **element-centre** stress resultants
+`{Mxx,Myy,Mxy,Qx,Qy,Nxx,Nyy,Nxy}` (a single Gauss point at the centroid — the average for a
+linearly-varying field, **not** nodal/peak values; no nodal extrapolation is performed).
+
+**Known element-level trait (disclosed, monitored).** The local 24×24 stiffness carries the 6
+true rigid-body zero modes **plus one inherent low-energy (near-zero, non-rigid) plate-bending
+mode** — a standard MITC4 trait, *not* distortion-induced and *not* the drilling DOF. Adjacent
+elements constrain it on assembly, so the drilling gate and every curved-shell benchmark stay
+non-singular; it is documented rather than hidden, and pinned by an element-level spectrum oracle
+in `linear_deep_audit` (asserts exactly 6 zero modes + the soft mode ≥10× softer than the first
+true deformation mode).
 
 **End releases.** With `SolveOptions.enableReleases`, a member's released local DOFs `c` are
 statically condensed out of the retained set `r`: `k* = k_rr − k_rc k_cc⁻¹ k_cr` **and**

@@ -14,6 +14,8 @@ if "!VSDIR!"=="" (
   echo [build] could not locate Visual Studio via vswhere. Open an "x64 Native Tools" prompt and run cl directly.
   exit /b 1
 )
+rem Put vswhere's own folder on PATH so vcvars64's internal bare `vswhere` call resolves quietly.
+for %%d in ("%VSWHERE%") do set "PATH=%%~dpd;%PATH%"
 call "!VSDIR!\VC\Auxiliary\Build\vcvars64.bat" >nul
 if errorlevel 1 ( echo [build] vcvars64 failed & exit /b 1 )
 

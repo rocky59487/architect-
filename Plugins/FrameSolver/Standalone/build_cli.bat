@@ -12,6 +12,8 @@ if exist "%VSWHERE%" (
   if "!VSDIR!"=="" for /f "usebackq tokens=*" %%i in (`"%VSWHERE%" -latest -property installationPath 2^>nul`) do set "VSDIR=%%i"
 )
 if "!VSDIR!"=="" ( echo [build_cli] could not locate Visual Studio via vswhere. & exit /b 1 )
+rem Put vswhere's own folder on PATH so vcvars64's internal bare `vswhere` call resolves quietly.
+for %%d in ("%VSWHERE%") do set "PATH=%%~dpd;%PATH%"
 call "!VSDIR!\VC\Auxiliary\Build\vcvars64.bat" >nul
 if errorlevel 1 ( echo [build_cli] vcvars64 failed & exit /b 1 )
 

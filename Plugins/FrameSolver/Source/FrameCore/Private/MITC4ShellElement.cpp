@@ -419,6 +419,16 @@ void MITC4ShellElement::recover(const VecX& u, SolveResult& R) const {
     sf.Mxx = M(0); sf.Myy = M(1); sf.Mxy = M(2);
     sf.Qx  = Q(0); sf.Qy  = Q(1);
     sf.Nxx = N(0); sf.Nyy = N(1); sf.Nxy = N(2);
+    // Per-corner bending moments (natural coords of the 4 CCW corners) for design peak
+    // recovery. Linear field -> these combine/envelope correctly; a constant-moment field
+    // gives every corner == the centre value above.
+    const real cxi[4]  = { -1.0, 1.0, 1.0, -1.0 };
+    const real ceta[4] = { -1.0, -1.0, 1.0, 1.0 };
+    for (int k = 0; k < 4; ++k) {
+        const Mat3x12 Bbk = Bbending(xl_, yl_, cxi[k], ceta[k]);
+        const Eigen::Matrix<real, 3, 1> Mk = Db * (Bbk * dp);
+        sf.MxxC[k] = Mk(0); sf.MyyC[k] = Mk(1); sf.MxyC[k] = Mk(2);
+    }
     R.shellForces[static_cast<size_t>(s_)] = sf;
 }
 

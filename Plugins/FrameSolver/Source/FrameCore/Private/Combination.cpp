@@ -55,6 +55,9 @@ SolveResult combine(const std::vector<SolveResult>& cases, const std::vector<rea
             o.Mxx += f * r.Mxx; o.Myy += f * r.Myy; o.Mxy += f * r.Mxy;
             o.Qx  += f * r.Qx;  o.Qy  += f * r.Qy;
             o.Nxx += f * r.Nxx; o.Nyy += f * r.Nyy; o.Nxy += f * r.Nxy;
+            for (int k = 0; k < 4; ++k) {
+                o.MxxC[k] += f * r.MxxC[k]; o.MyyC[k] += f * r.MyyC[k]; o.MxyC[k] += f * r.MxyC[k];
+            }
         }
     }
     out.singular = sing;
@@ -79,6 +82,11 @@ static void envShell(ShellElementForces& hi, ShellElementForces& lo, const Shell
     hi.Nxx = std::max(hi.Nxx, v.Nxx); lo.Nxx = std::min(lo.Nxx, v.Nxx);
     hi.Nyy = std::max(hi.Nyy, v.Nyy); lo.Nyy = std::min(lo.Nyy, v.Nyy);
     hi.Nxy = std::max(hi.Nxy, v.Nxy); lo.Nxy = std::min(lo.Nxy, v.Nxy);
+    for (int k = 0; k < 4; ++k) {
+        hi.MxxC[k] = std::max(hi.MxxC[k], v.MxxC[k]); lo.MxxC[k] = std::min(lo.MxxC[k], v.MxxC[k]);
+        hi.MyyC[k] = std::max(hi.MyyC[k], v.MyyC[k]); lo.MyyC[k] = std::min(lo.MyyC[k], v.MyyC[k]);
+        hi.MxyC[k] = std::max(hi.MxyC[k], v.MxyC[k]); lo.MxyC[k] = std::min(lo.MxyC[k], v.MxyC[k]);
+    }
 }
 
 ResultEnvelope envelope(const std::vector<SolveResult>& cases) {
