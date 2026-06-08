@@ -2,13 +2,14 @@
 #   [1/4] standalone FrameCore fixtures (analytic golden oracles)
 #   [2/4] UE headless automation (FrameCore.*)
 #   [3/4] OpenSees offline cross-validation (skipped if openseespy absent)
-#   [4/4] linear-analysis deep audit (post F17-F25 strengthening; 31 independent checks)
+#   [4/4] linear-analysis deep audit (post F17-F25 strengthening; prints its own
+#         independent-check count -- the audit reports "checks=N", not a hardcoded number)
 # Prints a combined PASS/FAIL summary and sets the exit code (0 = all green).
 #
 # Usage:  powershell -ExecutionPolicy Bypass -File E:\project\ArchSim\Scripts\run_gate.ps1
 param(
     [switch]$RequireOpenSees,       # CI: fail (not skip) when openseespy is absent
-    [int]$ExpectedUeTests = 26       # guard against silently running only a subset
+    [int]$ExpectedUeTests = 27       # guard against silently running only a subset
 )
 $ErrorActionPreference = 'Continue'
 

@@ -888,6 +888,58 @@ int main() {
         }
     }
 
+    // ---------- F26: element removal (Member::active) — redistribution + mechanism oracle ----------
+    {
+        // Propped cantilever = cantilever beam M0 (encastre base 0 -> tip 1) + vertical prop M1
+        // (fixed foot 2 -> tip 1). It is statically INDETERMINATE. Deactivating the prop must drop
+        // the structure back to a DETERMINATE cantilever whose exact tip deflection is the closed
+        // form -PL^3/3EI (the same oracle as F1). This is the element-removal / collapse foundation
+        // (C1) and its independent analytic oracle (C5): an inactive member leaves K cleanly, its own
+        // forces stay zero, and removal is byte-identical to physically omitting the member.
+        const real L = 2000.0, H = 1000.0, P = 1000.0;
+        const real dExp = -P * L * L * L / (3.0 * mat.E * sec.Iy);   // cantilever tip deflection (closed form)
+
+        auto buildPropped = [&](FrameModel& m) {
+            fixtures::prepMatSec(m, mat, sec);
+            Node n0(0, 0.0, 0.0,  0.0); n0.fixAll();   // encastre base
+            Node n1(1,   L, 0.0,  0.0);                // free tip
+            Node n2(2,   L, 0.0,   -H); n2.fixAll();   // prop foot, below the tip
+            m.nodes = { n0, n1, n2 };
+            m.members = { Member(0, 0, 1, 0, 0),       // cantilever beam
+                          Member(1, 2, 1, 0, 0) };     // vertical prop
+            NodalLoad p; p.node = 1; p.comp[Uz] = -P;
+            m.nodalLoads = { p };
+        };
+
+        std::printf("[F26] element removal (Member::active) — propped cantilever, remove prop -> -PL^3/3EI=%.5g\n", dExp);
+
+        FrameModel mFull; buildPropped(mFull);
+        const SolveResult rFull = solve(mFull);
+        checkTrue("propped cantilever non-singular", !rFull.singular, rFull.diagnostic);
+        checkTrue("prop stiffens tip (|defl| < cantilever)", std::fabs(rFull.disp(1, Uz)) < std::fabs(dExp), "");
+
+        // remove the prop (M1) -> pure cantilever -> tip deflection = -PL^3/3EI exactly
+        FrameModel mCut = mFull; mCut.members[1].active = false;
+        const SolveResult rCut = solve(mCut);
+        checkTrue("after removing prop: non-singular", !rCut.singular, rCut.diagnostic);
+        checkClose("removed prop force stays 0", std::fabs(rCut.memberForces[1].endI.N), 0.0, 1e-9);
+        checkClose("tip deflection = -PL^3/3EI", rCut.disp(1, Uz), dExp, 1e-6);
+
+        // removal-by-flag invariant: active=false MUST equal physically omitting the member
+        FrameModel mOmit; buildPropped(mOmit);
+        mOmit.members = { mOmit.members[0] };   // drop the prop entirely
+        const SolveResult rOmit = solve(mOmit);
+        real duMax = 0.0;
+        for (size_t k = 0; k < rCut.u.size() && k < rOmit.u.size(); ++k)
+            duMax = std::max(duMax, std::fabs(rCut.u[k] - rOmit.u[k]));
+        checkClose("active=false == omitted member (disp)", duMax, 0.0, 1e-9);
+
+        // disable BOTH members -> the tip node hangs off nothing -> mechanism (singular)
+        FrameModel mMech = mFull; mMech.members[0].active = false; mMech.members[1].active = false;
+        const SolveResult rMech = solve(mMech);
+        checkTrue("isolated node after removal -> mechanism", rMech.singular, "expected singular");
+    }
+
     std::printf("\n%s  (failures=%d)\n", g_fail == 0 ? "ALL PASS" : "FAILURES", g_fail);
     return g_fail == 0 ? 0 : 1;
 }

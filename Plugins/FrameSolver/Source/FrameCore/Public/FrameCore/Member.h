@@ -34,6 +34,13 @@ struct Member {
     // hook for the truss idealization (release rotational DOFs) added later.
     std::array<bool, 12> release { {} };
 
+    // When false, the member is excluded from assembly: it contributes nothing to the
+    // global stiffness K, adds no equivalent nodal loads, and its end forces stay zero.
+    // This is the element-removal hook for progressive-collapse driving (disable the
+    // governing member, re-factor, re-solve). Toggling it is a STRUCTURAL change, so it
+    // is part of the solveLoad reuse fingerprint (a flipped flag rejects a stale factor).
+    bool active = true;
+
     Member() = default;
     Member(MemberId id_, NodeId i_, NodeId j_, int matIdx_, int secIdx_)
         : id(id_), i(i_), j(j_), matIdx(matIdx_), secIdx(secIdx_) {}

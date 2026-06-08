@@ -1,6 +1,7 @@
 #pragma once
 #include "FrameCore/SolveResult.h"
 #include <vector>
+#include <string>
 
 namespace frame {
 
@@ -33,6 +34,13 @@ struct ResultEnvelope {
     std::vector<MemberEndForces> endIMax, endIMin;      // per member, component-wise
     std::vector<MemberEndForces> endJMax, endJMin;
     std::vector<ShellElementForces> shellMax, shellMin; // per shell, component-wise
+
+    // Set true when the cases are NOT envelopable together (results from different models —
+    // mismatched DOF / member / shell counts). Mirrors SolveResult/combine(): rather than let
+    // the min()-bounded loop silently fold partial/garbage data, the envelope is flagged invalid
+    // and `diagnostic` explains why. Empty input is a no-op (singular stays false).
+    bool        singular = false;
+    std::string diagnostic;
 };
 FRAMECORE_API ResultEnvelope envelope(const std::vector<SolveResult>& cases);
 

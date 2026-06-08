@@ -15,10 +15,15 @@ namespace frame {
 
 namespace {
 // Structural fingerprint: hashes everything solveLoad() must NOT change between an
-// assembleAndFactor() and its reuse — node count/positions/support FLAGS, member
-// connectivity/refVec/releases, shell connectivity/thickness, and the baked distributed
-// loads (member UDLs, shell pressures). It deliberately EXCLUDES nodal loads and prescribed
-// VALUES, which solveLoad is allowed to vary (the interactive / settlement path).
+// assembleAndFactor() and its reuse — node id/positions/support FLAGS, member
+// id/connectivity/refVec/releases/matIdx/secIdx/active, shell id/connectivity/thickness/matIdx,
+// the referenced material VALUES (E/G/nu/rho) and section VALUES (A/Iy/Iz/J/Asy/Asz), and
+// the baked distributed loads (member UDLs, shell pressures). The factorization bakes in the
+// stiffness those properties imply, so changing E, Iz, or which material/section an element
+// points to would make a reused factorization a SILENT STALE SOLVE — they must be fingerprinted
+// (the section/material values were the gap; see PROJECT.txt P1). It deliberately EXCLUDES nodal
+// loads and prescribed VALUES, which solveLoad is allowed to vary (the interactive / settlement
+// path).
 inline uint64_t fpMix(uint64_t h, uint64_t v) {
     return h ^ (v + 0x9e3779b97f4a7c15ULL + (h << 6) + (h >> 2));
 }
@@ -33,19 +38,38 @@ uint64_t modelFingerprint(const FrameModel& m) {
     h = fpMix(h, m.memberUDLs.size());
     h = fpMix(h, m.shellPressures.size());
     for (const auto& n : m.nodes) {
+        h = fpMix(h, static_cast<uint64_t>(n.id));
         h = fpMix(h, fpBits(n.pos.x)); h = fpMix(h, fpBits(n.pos.y)); h = fpMix(h, fpBits(n.pos.z));
         uint64_t fb = 0; for (int d = 0; d < 6; ++d) if (n.fixed[d]) fb |= (1ull << d);
         h = fpMix(h, fb);
     }
     for (const auto& mem : m.members) {
+        h = fpMix(h, static_cast<uint64_t>(mem.id));
         h = fpMix(h, static_cast<uint64_t>(mem.i)); h = fpMix(h, static_cast<uint64_t>(mem.j));
+        h = fpMix(h, static_cast<uint64_t>(static_cast<int64_t>(mem.matIdx)));
+        h = fpMix(h, static_cast<uint64_t>(static_cast<int64_t>(mem.secIdx)));
         h = fpMix(h, fpBits(mem.refVec.x)); h = fpMix(h, fpBits(mem.refVec.y)); h = fpMix(h, fpBits(mem.refVec.z));
         uint64_t rb = 0; for (int d = 0; d < 12; ++d) if (mem.release[d]) rb |= (1ull << d);
         h = fpMix(h, rb);
+        h = fpMix(h, mem.active ? 1ull : 0ull);   // toggling active is a structural (remove/restore) change
     }
     for (const auto& sh : m.shells) {
+        h = fpMix(h, static_cast<uint64_t>(static_cast<int64_t>(sh.id)));
         for (int k = 0; k < 4; ++k) h = fpMix(h, static_cast<uint64_t>(sh.n[k]));
+        h = fpMix(h, static_cast<uint64_t>(static_cast<int64_t>(sh.matIdx)));
         h = fpMix(h, fpBits(sh.t));
+    }
+    // Material / section VALUES the elements reference by index. Changing E / Iz / etc. alters
+    // the assembled K, so a reused factorization built on the OLD values is a stale solve. We
+    // hash all entries (not just referenced ones) — editing an unused entry is harmless
+    // over-conservatism, while missing a used one is a silent correctness bug.
+    for (const auto& mat : m.materials) {
+        h = fpMix(h, fpBits(mat.E)); h = fpMix(h, fpBits(mat.G));
+        h = fpMix(h, fpBits(mat.nu)); h = fpMix(h, fpBits(mat.rho));
+    }
+    for (const auto& s : m.sections) {
+        h = fpMix(h, fpBits(s.A));   h = fpMix(h, fpBits(s.Iy));  h = fpMix(h, fpBits(s.Iz));
+        h = fpMix(h, fpBits(s.J));   h = fpMix(h, fpBits(s.Asy)); h = fpMix(h, fpBits(s.Asz));
     }
     for (const auto& u : m.memberUDLs) {
         h = fpMix(h, static_cast<uint64_t>(u.member));
@@ -85,7 +109,8 @@ PreparedSystem assembleAndFactor(const FrameModel& model, const SolveOptions& op
     // build the element list (beams + shells), prepare geometry + baked distributed loads.
     S.elems.reserve(model.members.size() + model.shells.size());
     for (size_t e = 0; e < model.members.size(); ++e)
-        S.elems.push_back(std::make_unique<BeamColumnElement>((int)e));
+        if (model.members[e].active)   // inactive members are excluded from assembly (element removal)
+            S.elems.push_back(std::make_unique<BeamColumnElement>((int)e));
     for (size_t s = 0; s < model.shells.size(); ++s)
         S.elems.push_back(std::make_unique<MITC4ShellElement>((int)s));
 

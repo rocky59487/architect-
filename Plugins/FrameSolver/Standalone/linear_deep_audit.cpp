@@ -640,6 +640,23 @@ void testSolveLoadFingerprint() {
                "baked UDL would be stale under factorization reuse",
                "singular flag (want 1)", r.singular ? 1.0 : 0.0, 0.0, r.singular);
     }
+    {   // (e) material-VALUE change must be rejected: the factorization baked the OLD E into K
+        // (this is the section/material gap PROJECT.txt P1 flagged — counts/geometry unchanged,
+        // only the referenced Young's modulus differs, yet reuse would be a silent stale solve).
+        FrameModel m2 = m; m2.materials[0].E *= 2.0;
+        const SolveResult r = solveLoad(ps, m2);
+        addRow("solveLoad guard", "material E change rejected",
+               "fingerprint must hash material values (stale K otherwise)",
+               "singular flag (want 1)", r.singular ? 1.0 : 0.0, 0.0, r.singular);
+    }
+    {   // (f) section-VALUE change must be rejected: changing Iz alters bending stiffness, so the
+        // baked factorization is stale even though node/member/shell counts are identical.
+        FrameModel m2 = m; m2.sections[0].Iz *= 2.0;
+        const SolveResult r = solveLoad(ps, m2);
+        addRow("solveLoad guard", "section Iz change rejected",
+               "fingerprint must hash section values (stale K otherwise)",
+               "singular flag (want 1)", r.singular ? 1.0 : 0.0, 0.0, r.singular);
+    }
 }
 
 void testShellCornerMoments() {
@@ -712,6 +729,58 @@ void testSparseModal() {
            "max relative omega error", maxRel, 1e-6, maxRel < 1e-6);
 }
 
+void testElementRemoval() {
+    // C1 element removal + C5 oracle. A propped cantilever (cantilever M0 + vertical prop M1) is
+    // statically INDETERMINATE; deactivating the prop (Member::active=false) must drop it to a
+    // DETERMINATE cantilever whose exact tip deflection is the closed form -PL^3/3EI. Also checks
+    // the removal-by-flag invariant (active=false == physically omitting the member) and that
+    // removing every member at a node yields a mechanism (LDLT singular).
+    Material mat(210000.0, 80769.0, 7850.0);
+    Section  sec = Section::Rectangular(100.0, 100.0);
+    const real L = 2000.0, H = 1000.0, P = 1000.0;
+    const real dExp = -P * L * L * L / (3.0 * mat.E * sec.Iy);
+
+    auto buildPropped = [&](FrameModel& m) {
+        m = FrameModel{};
+        m.materials = { mat }; m.sections = { sec };
+        Node n0(0, 0.0, 0.0, 0.0); n0.fixAll();
+        Node n1(1,   L, 0.0, 0.0);
+        Node n2(2,   L, 0.0,  -H); n2.fixAll();
+        m.nodes = { n0, n1, n2 };
+        m.members = { Member(0, 0, 1, 0, 0), Member(1, 2, 1, 0, 0) };
+        NodalLoad p; p.node = 1; p.comp[Uz] = -P; m.nodalLoads = { p };
+    };
+
+    FrameModel mFull; buildPropped(mFull);
+    const SolveResult rFull = solve(mFull);   // indeterminate baseline (prop present)
+
+    FrameModel mCut = mFull; mCut.members[1].active = false;   // remove the prop
+    const SolveResult rCut = solve(mCut);
+    const real dErr = (!rCut.singular) ? relErr(rCut.disp(1, Uz), dExp) : 1.0;
+    addRow("Element removal", "deactivated member drops indeterminate -> determinate",
+           "remove prop from propped cantilever -> tip deflection = -PL^3/3EI (closed form)",
+           "relative tip-deflection error", dErr, 1e-9, !rCut.singular && dErr < 1e-9);
+    addRow("Element removal", "inactive member carries no force",
+           "removed member's recovered end force must be exactly zero",
+           "|N| of removed member", std::fabs(rCut.memberForces[1].endI.N), 1e-9,
+           std::fabs(rCut.memberForces[1].endI.N) < 1e-9);
+
+    FrameModel mOmit; buildPropped(mOmit); mOmit.members = { mOmit.members[0] };   // drop prop entirely
+    const SolveResult rOmit = solve(mOmit);
+    real duMax = 0.0;
+    for (size_t k = 0; k < rCut.u.size() && k < rOmit.u.size(); ++k)
+        duMax = std::max(duMax, std::fabs(rCut.u[k] - rOmit.u[k]));
+    addRow("Element removal", "active=false is identical to omitting the member",
+           "displacement field of (member inactive) == (member absent)",
+           "max |du| between the two models", duMax, 1e-9, duMax < 1e-9);
+
+    FrameModel mMech = mFull; mMech.members[0].active = false; mMech.members[1].active = false;
+    const SolveResult rMech = solve(mMech);
+    addRow("Element removal", "removing every member at a node -> mechanism",
+           "isolated free node has no stiffness -> LDLT flags singular",
+           "singular flag (want 1)", rMech.singular ? 1.0 : 0.0, 0.0, rMech.singular);
+}
+
 }  // namespace
 
 int main() {
@@ -731,6 +800,7 @@ int main() {
     testSolveLoadFingerprint();
     testShellCornerMoments();
     testSparseModal();
+    testElementRemoval();
 
     int failures = 0;
     std::cout << "Linear-analysis deep audit (post F17-F25 strengthening)\n\n";

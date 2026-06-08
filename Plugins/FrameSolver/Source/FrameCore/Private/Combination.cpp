@@ -93,6 +93,21 @@ ResultEnvelope envelope(const std::vector<SolveResult>& cases) {
     ResultEnvelope E;
     if (cases.empty()) return E;
     const SolveResult& b = cases[0];
+
+    // Size-consistency guard (mirrors combine()): results from DIFFERENT models would otherwise be
+    // silently min/max-folded over their overlapping prefix only, leaving the rest pinned at the
+    // base case's values. Flag that explicitly instead of returning a half-enveloped result.
+    for (size_t c = 1; c < cases.size(); ++c) {
+        if (cases[c].u.size() != b.u.size() ||
+            cases[c].reactions.size() != b.reactions.size() ||
+            cases[c].memberForces.size() != b.memberForces.size() ||
+            cases[c].shellForces.size() != b.shellForces.size()) {
+            E.singular = true;
+            E.diagnostic = "envelope: result size mismatch at case " + std::to_string(c) +
+                           " (cases from different models?)";
+            return E;
+        }
+    }
     E.uMax = b.u;        E.uMin = b.u;
     E.reactMax = b.reactions; E.reactMin = b.reactions;
     E.endIMax.resize(b.memberForces.size()); E.endIMin.resize(b.memberForces.size());
