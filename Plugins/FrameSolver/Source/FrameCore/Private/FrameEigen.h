@@ -23,6 +23,7 @@
   #include <Eigen/Dense>
   #include <Eigen/Sparse>
   #include <Eigen/SparseCholesky>    // SimplicialLDLT
+  #include <Eigen/IterativeLinearSolvers>   // ConjugateGradient (ReSolve Tier-2)
   THIRD_PARTY_INCLUDES_END
   PRAGMA_DEFAULT_VISIBILITY_END
 #else
@@ -30,6 +31,7 @@
   #include <Eigen/Dense>
   #include <Eigen/Sparse>
   #include <Eigen/SparseCholesky>
+  #include <Eigen/IterativeLinearSolvers>
 #endif
 
 #include "FrameCore/FrameTypes.h"

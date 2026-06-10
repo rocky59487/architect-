@@ -4,7 +4,6 @@
 #include "BeamColumnElement.h"
 #include "MITC4ShellElement.h"
 
-#include <Eigen/IterativeLinearSolvers>
 #include <algorithm>
 #include <memory>
 #include <string>
