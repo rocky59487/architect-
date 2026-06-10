@@ -289,6 +289,13 @@ S9 (CR) ───► S10 (N-M 塑鉸,必在 CR 後;R4 方向耦合)
 > 數字是 spec 預測(各 spec ⑦ 節);實作時以實際新增為準並回填本表 + `run_gate.ps1`。
 > UE 期望數基準取決於 S1/S2 先後(S2 spec ⑤ 已註)。
 
+**實作狀態(2026-06-11,夜間無人監督)**:S1 進行中。已落地並 push:R8 `build_perf.bat` 修復(`0e2e500`)、
+**稀疏屈曲** overload(`a91b171`,standalone **F34** + audit **63**;注意實際編號 F34 而非 spec 暫定 F36,
+因 baseline 最高 logical fixture=F33)、`PERFORMANCE_BASELINE.md` 正式化 + 同機錨點。**ReSolveSession**
+(三層階梯,本表的 F34/F35 預測項)尚未實作,已備妥逐位元交接筆記於 `docs/PROGRESS_S1.md`(建議拆
+Tier-1+Tier-3 / Tier-2 兩個完整 commit)。UE automation + OpenSees 重 gate 依務實分層政策留待 S1 完成里程碑。
+詳見 [PROGRESS_S1.md](PROGRESS_S1.md)。
+
 ---
 
 ## 8. 風險登記冊(濃縮自 roadmap §11)

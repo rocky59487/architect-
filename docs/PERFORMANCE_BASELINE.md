@@ -1,9 +1,21 @@
-# FrameCore 效能基線(初版:2026-06-10 研究輪)
+# FrameCore 效能基線(正式;初版 2026-06-10 研究輪,S1 起轉正式)
 
-> 量測代碼:`Research/`(scratch,不入 gate);原始輸出 `Research/out/*.txt`;單機
-> (Windows 11,cl /O2,Eigen 3.4.0 SimplicialLDLT/AMD,單執行緒)。所有數字 `[VERIFIED]`
-> 除非標注外推。S1 起本檔轉正式:每階段效能驗收(spec ⑧ 節)結果回填於此,
-> 退步 >30% 視為驗收失敗。
+> 量測代碼:研究輪數字出自 `Research/`(scratch,不入 gate),原始輸出 `Research/out/*.txt`;
+> 單機(Windows 11,cl /O2 /MD,Eigen 3.4.0 SimplicialLDLT/AMD,單執行緒)。所有數字 `[VERIFIED]`
+> 除非標注外推。**每階段效能驗收(各 spec ⑧ 節)結果回填於此,退步 >30% 視為驗收失敗。**
+> **同機驗收的標準工具 = `Standalone\frame_perf.exe`(engine `solve()` 路徑,經 R8 修復後可連結,commit `0e2e500`);
+> 跨機不比絕對毫秒,只比倍率對倍率,驗收當日先重跑取當日基線(見 §0)。**
+
+## 0. 同機驗證錨點(每階段驗收前先重跑,取「當日基線」)
+
+| 量測 | 命令 | 當日值 | 對照 |
+|---|---|---|---|
+| XXL 全解 `solve()`(nf=18,720) | `frame_perf.exe --preset xxl --repeat 5 --warmup 1` | **median 1578.8 ms**(2026-06-11) | §1 第 1 列 factor 1.55 s `[VERIFIED]`;±8% 屬執行間 OS 調度變動 |
+
+讀法:`frame_perf` 的 `solveMs` = 完整 `assembleAndFactor + solveLoad`(factor 支配)。驗收某階段(如 S1 ReSolve、
+S8 殼)前,先在**同一台機**跑上列命令取當日 XXL 基線,再把待測操作的絕對毫秒換算成「相對 XXL 全解的倍率」,
+與本檔記錄的倍率比較(退步 >30% = 失敗)。如此即使機器更換/時脈漂移,倍率對倍率仍可比。
+今日錨點確認研究輪的 18.7k DOF factor 數字在本機 engine 路徑重現(1578.8 ms vs 1546 ms,差 ±2%,在噪音內)。
 
 ## 1. 靜力直接解規模階梯(`exp_million_dof`,塔式 benchmark 家族)
 
