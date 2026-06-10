@@ -1,0 +1,18 @@
+﻿======================================================
+ FrameSolver verification gate
+======================================================
+
+[1/4] standalone FrameCore gate (build.bat)...
+       standalone: ALL PASS  (failures=0) (exit 0)
+
+[2/4] UE headless automation...
+       UE automation: 34 tests run, exit code 0 (process exit 0; expected >= 34)
+
+[3/4] OpenSees offline cross-validation...
+       OpenSees compare: PASS (exit 0)
+
+[4/4] linear-analysis deep audit...
+       linear deep audit: PASS failures=0 checks=62 (exit 0)
+
+======================================================
+ GATE: PASS  (standalone OK, UE 34 tests green, OpenSees PASS, deep audit OK)

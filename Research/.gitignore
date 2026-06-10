@@ -1,0 +1,5 @@
+obj_core/
+obj_exp/
+bin/
+out/ws_reports/
+__pycache__/

@@ -1,0 +1,19 @@
+﻿ladder start 2026-06-10T18:56:08.1517540+08:00
+--- running nx=12 ny=9 st=24 18:56:08
+[scale-begin] nx=12 ny=9 st=24 nodes=3250 members=9816 nf=18720 buildMs=0 memMiB=2
+[scale] nx=12 ny=9 st=24 nf=18720 nnzK=823752 factorMs=1546 solveMs=17.9 umax=1.98117 memFactorMiB=120 peakMiB=181
+exit=0
+--- running nx=18 ny=14 st=36 18:56:09
+[scale-begin] nx=18 ny=14 st=36 nodes=10545 members=31860 nf=61560 buildMs=1 memMiB=4
+[scale] nx=18 ny=14 st=36 nf=61560 nnzK=2673540 factorMs=30558 solveMs=108.0 umax=5.43435 memFactorMiB=585 peakMiB=772
+exit=0
+--- running nx=30 ny=24 st=40 18:56:40
+[scale-begin] nx=30 ny=24 st=40 nodes=31775 members=95080 nf=186000 buildMs=2 memMiB=11
+[scale] nx=30 ny=24 st=40 nf=186000 nnzK=7989660 factorMs=522026 solveMs=805.2 umax=9.92527 memFactorMiB=3257 peakMiB=3803
+exit=0
+--- running nx=40 ny=32 st=48 19:05:23
+[scale-begin] nx=40 ny=32 st=48 nodes=66297 members=198192 nf=389664 buildMs=4 memMiB=22
+[scale] nx=40 ny=32 st=48 nf=389664 nnzK=16656516 factorMs=3229228 solveMs=3749.4 umax=16.6346 memFactorMiB=10357 peakMiB=10359
+exit=0
+--- running nx=60 ny=50 st=54 19:59:17
+[scale-begin] nx=60 ny=50 st=54 nodes=171105 members=509814 nf=1007964 buildMs=12 memMiB=55
