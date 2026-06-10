@@ -51,6 +51,7 @@ cl /nologo /EHsc /std:c++17 /O2 /MD /utf-8 /DEIGEN_MPL2_ONLY /DFRAMECORE_BUILD_S
    Source\FrameCore\Private\ModalDynamics.cpp ^
    Source\FrameCore\Private\Connectivity.cpp ^
    Source\FrameCore\Private\Collapse.cpp ^
+   Source\FrameCore\Private\Reanalysis.cpp ^
    Standalone\main.cpp
 if errorlevel 1 ( echo [build] COMPILE FAILED & popd & exit /b 1 )
 

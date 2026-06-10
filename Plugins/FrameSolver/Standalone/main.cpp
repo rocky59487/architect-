@@ -8,6 +8,7 @@
 #include "FrameCore/InfluenceLine.h"
 #include "FrameCore/ModalAnalysis.h"
 #include "FrameCore/BucklingAnalysis.h"
+#include "FrameCore/Reanalysis.h"
 #include "FrameCore/ResponseSpectrum.h"
 #include "FrameCore/ModalDynamics.h"
 #include "FrameCore/Connectivity.h"
@@ -1660,6 +1661,117 @@ int main() {
             checkTrue("all-tension dense singular (no compression)", d.singular, d.diagnostic);
             checkTrue("all-tension forced-sparse singular (defers to dense)", s.singular, s.diagnostic);
             checkTrue("all-tension sparse diagnostic == dense", s.diagnostic == d.diagnostic, s.diagnostic);
+        }
+    }
+
+    // ---------- F35: ReSolve ladder (Tier-1 Woodbury) vs fresh + F-increment + mechanism ----------
+    {
+        std::printf("[F35] ReSolve ladder (Tier-1) vs fresh + F-increment + mechanism\n");
+        auto relMax = [](const std::vector<real>& a, const std::vector<real>& b) -> real {
+            real num = 0, den = 1e-30;
+            const size_t n = std::min(a.size(), b.size());
+            for (size_t i = 0; i < n; ++i) { num = std::max(num, std::fabs(a[i] - b[i])); den = std::max(den, std::fabs(b[i])); }
+            return num / den;
+        };
+        auto agree = [&](const char* tag, const std::vector<real>& a, const std::vector<real>& b, real tol) {
+            const real e = relMax(a, b);
+            checkTrue(tag, e < tol, "rel=" + std::to_string(e));
+        };
+
+        // (a) rigid portal (2 columns + 2 beam halves), UDL on the beam halves. A SINGLE member
+        //     removal stays stable; removing the UDL member exercises the F-increment (its
+        //     equivalent nodal load must leave F). 5 nodes: bases 0/1 (fixed), tops 2/3, mid 4.
+        const real H = 3000.0, Lb = 6000.0, w = 8.0;
+        auto buildPortal = [&]() {
+            FrameModel m;
+            m.materials.push_back(mat); m.sections.push_back(sec);
+            Node n0(0, 0,      0, 0); n0.fixAll();
+            Node n1(1, Lb,     0, 0); n1.fixAll();
+            Node n2(2, 0,      0, H);
+            Node n3(3, Lb,     0, H);
+            Node n4(4, Lb / 2, 0, H);
+            m.nodes = { n0, n1, n2, n3, n4 };
+            Member c0(0, 0, 2, 0, 0); c0.refVec = Vec3(1, 0, 0);
+            Member c1(1, 1, 3, 0, 0); c1.refVec = Vec3(1, 0, 0);
+            Member b0(2, 2, 4, 0, 0); b0.refVec = Vec3(0, 0, 1);
+            Member b1(3, 4, 3, 0, 0); b1.refVec = Vec3(0, 0, 1);
+            m.members = { c0, c1, b0, b1 };
+            MemberUDL u0; u0.member = 2; u0.w_local = { 0, -w, 0 };
+            MemberUDL u1; u1.member = 3; u1.w_local = { 0, -w, 0 };
+            m.memberUDLs = { u0, u1 };
+            return m;
+        };
+        FrameModel portal = buildPortal();
+        ReSolveSession session(portal);
+        checkTrue("portal session valid", session.valid(), session.diagnostic());
+
+        ReanalysisStats st0;
+        const SolveResult re0 = session.solve(&st0);
+        const SolveResult fr0 = solve(portal);
+        checkTrue("baseline tier == 0", st0.tier == 0, "");
+        agree("baseline ReSolve == fresh", re0.u, fr0.u, 1e-10);
+
+        // remove the UDL beam half b0 (id 2) -> Tier-1 + F-increment
+        session.setMemberActive(2, false);
+        ReanalysisStats st1;
+        const SolveResult re1 = session.solve(&st1);
+        FrameModel w1 = buildPortal(); w1.members[2].active = false;
+        const SolveResult fr1 = solve(w1);
+        checkTrue("remove UDL member: tier == 1", st1.tier == 1, "");
+        checkTrue("remove UDL member: not singular", !re1.singular, re1.diagnostic);
+        std::printf("   removed b0(UDL): tier=%d rank=%d reRel=%.2e\n", st1.tier, st1.rank, relMax(re1.u, fr1.u));
+        agree("remove UDL member: ReSolve == fresh (F-increment)", re1.u, fr1.u, 1e-10);
+
+        // restore b0 -> the ladder's -lambda/+lambda columns cancel; result back to baseline
+        session.setMemberActive(2, true);
+        const SolveResult reR = session.solve();
+        agree("restore member: ReSolve == baseline (drift)", reR.u, fr0.u, 1e-12);
+
+        // independent single removal of a column c0 (id 0) -> still Tier-1, still == fresh
+        session.setMemberActive(0, false);
+        ReanalysisStats st2;
+        const SolveResult re2 = session.solve(&st2);
+        FrameModel w2 = buildPortal(); w2.members[0].active = false;
+        const SolveResult fr2 = solve(w2);
+        checkTrue("remove column: tier == 1", st2.tier == 1, "");
+        agree("remove column: ReSolve == fresh", re2.u, fr2.u, 1e-10);
+
+        // (b) mechanism: a 2-member cantilever column chain; removing the base floats the top.
+        {
+            FrameModel chain;
+            chain.materials.push_back(mat); chain.sections.push_back(sec);
+            Node m0(0, 0, 0, 0); m0.fixAll();
+            Node m1(1, 0, 0, 1500.0);
+            Node m2(2, 0, 0, 3000.0);
+            chain.nodes = { m0, m1, m2 };
+            chain.members = { Member(0, 0, 1, 0, 0), Member(1, 1, 2, 0, 0) };
+            NodalLoad nl; nl.node = 2; nl.comp[Ux] = 1000.0; chain.nodalLoads = { nl };
+            ReSolveSession cs(chain);
+            checkTrue("chain session valid", cs.valid(), cs.diagnostic());
+            cs.setMemberActive(0, false);
+            ReanalysisStats sm;
+            const SolveResult rm = cs.solve(&sm);
+            FrameModel cw = chain; cw.members[0].active = false;
+            const SolveResult fm = solve(cw);
+            checkTrue("chain remove base: capacitance mechanism flagged", sm.mechanism, "");
+            checkTrue("chain remove base: ReSolve singular", rm.singular, rm.diagnostic);
+            checkTrue("chain remove base: fresh singular too", fm.singular, fm.diagnostic);
+        }
+
+        // (c) shell F-increment: clamped 2x2 plate under pressure; remove one facet, still stable.
+        {
+            Material matShell(30000.0, 11538.461538, 7850.0);   // E=30000, nu=0.3
+            FrameModel plate; fixtures::clampedPlateShell(plate, 1000.0, 50.0, 2, 1.0, matShell);
+            ReSolveSession sps(plate);
+            checkTrue("plate session valid", sps.valid(), sps.diagnostic());
+            sps.setShellActive(0, false);
+            ReanalysisStats ss;
+            const SolveResult rs = sps.solve(&ss);
+            FrameModel pw = plate; pw.shells[0].active = false;
+            const SolveResult fs = solve(pw);
+            checkTrue("shell remove facet: not singular", !rs.singular, rs.diagnostic);
+            std::printf("   removed shell facet 0: tier=%d rank=%d reRel=%.2e\n", ss.tier, ss.rank, relMax(rs.u, fs.u));
+            agree("shell remove facet: ReSolve == fresh (pressure F-increment)", rs.u, fs.u, 1e-10);
         }
     }
 

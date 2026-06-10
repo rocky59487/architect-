@@ -1,4 +1,5 @@
 #include "FrameCore/BucklingAnalysis.h"
+#include "FrameCore/Reanalysis.h"
 #include "FrameCore/Combination.h"
 #include "FrameCore/FrameSolver.h"
 #include "FrameCore/InfluenceLine.h"
@@ -1262,6 +1263,74 @@ void testSafetyAndMargin() {
            rS.singular && rS.pivotMargin == 0.0);
 }
 
+void testReanalysis() {
+    Material mat(210000.0, 80769.230769, 7850.0);
+    Section  sec = Section::Rectangular(120.0, 120.0);
+
+    // Propped cantilever: a horizontal beam (n0 fixed - n1) plus a prop (n2 fixed - n1). Statically
+    // indeterminate; removing the prop leaves a stable cantilever -> one exact Tier-1 removal.
+    auto build = [&]() {
+        FrameModel m;
+        m.materials.push_back(mat);
+        m.sections.push_back(sec);
+        Node n0(0, 0.0,    0, 0.0);      n0.fixAll();
+        Node n1(1, 3000.0, 0, 0.0);
+        Node n2(2, 3000.0, 0, -2000.0);  n2.fixAll();
+        m.nodes = { n0, n1, n2 };
+        Member beam(0, 0, 1, 0, 0); beam.refVec = Vec3(0, 0, 1);
+        Member prop(1, 2, 1, 0, 0); prop.refVec = Vec3(1, 0, 0);
+        m.members = { beam, prop };
+        NodalLoad nl; nl.node = 1; nl.comp[Uz] = -5000.0; m.nodalLoads = { nl };
+        return m;
+    };
+    auto relU = [](const SolveResult& a, const SolveResult& b) -> real {
+        real num = 0, den = 1e-30;
+        const size_t n = std::min(a.u.size(), b.u.size());
+        for (size_t i = 0; i < n; ++i) { num = std::max(num, std::fabs(a.u[i] - b.u[i])); den = std::max(den, std::fabs(b.u[i])); }
+        return num / den;
+    };
+
+    FrameModel base = build();
+    ReSolveSession s(base);
+    const SolveResult fr0 = solve(base);
+
+    // (1) Tier-1 Woodbury removal == fresh assembleAndFactor+solveLoad
+    s.setMemberActive(1, false);
+    ReanalysisStats st1;
+    const SolveResult re1 = s.solve(&st1);
+    FrameModel w1 = build(); w1.members[1].active = false;
+    const real e1 = relU(re1, solve(w1));
+    addRow("Reanalysis", "Tier-1 Woodbury == fresh",
+           "remove a member; low-rank update on the baseline factor vs a fresh assembleAndFactor+solveLoad",
+           "relative u error", e1, 1e-9, st1.tier == 1 && !re1.singular && e1 < 1e-9);
+
+    // (2) remove + restore returns to baseline (the ladder's signed columns cancel)
+    s.setMemberActive(1, true);
+    const real eR = relU(s.solve(), fr0);
+    addRow("Reanalysis", "remove+restore returns to baseline",
+           "removing then restoring a member cancels in the ladder to factorization round-off",
+           "relative u drift", eR, 1e-11, eR < 1e-11);
+
+    // (3) capacitance mechanism detection (no connectivity needed)
+    FrameModel chain;
+    chain.materials.push_back(mat);
+    chain.sections.push_back(sec);
+    Node c0(0, 0, 0, 0);       c0.fixAll();
+    Node c1(1, 0, 0, 1500.0);
+    Node c2(2, 0, 0, 3000.0);
+    chain.nodes = { c0, c1, c2 };
+    chain.members = { Member(0, 0, 1, 0, 0), Member(1, 1, 2, 0, 0) };
+    NodalLoad nl; nl.node = 2; nl.comp[Ux] = 1000.0; chain.nodalLoads = { nl };
+    ReSolveSession cs(chain);
+    cs.setMemberActive(0, false);
+    ReanalysisStats sm;
+    const SolveResult rm = cs.solve(&sm);
+    addRow("Reanalysis", "capacitance mechanism detection",
+           "removing the base of a 2-member chain -> capacitance singular -> mechanism flag + singular",
+           "flagged & singular (want 1)", (sm.mechanism && rm.singular) ? 1.0 : 0.0, 0.0,
+           sm.mechanism && rm.singular);
+}
+
 }  // namespace
 
 int main() {
@@ -1289,6 +1358,7 @@ int main() {
     testPlasticHingeMechanics();
     testHingeDriverCompat();
     testSafetyAndMargin();
+    testReanalysis();
 
     int failures = 0;
     std::cout << "Linear-analysis deep audit (post F17-F25 strengthening)\n\n";
