@@ -994,6 +994,96 @@ void testCollapseDriver() {
     }
 }
 
+void testShellFailureScreen() {
+    // 3d shell von Mises screen. (a) FE-vs-handbook: simply-supported square plate under UDL,
+    // Navier/Timoshenko centre moment Mx = My = 0.0479 q a^2 (nu = 0.3). With Mx == My the
+    // surface von Mises equals the bending stress itself (sx = sy -> vM = sx), so the screen's
+    // worst D/C must approach 6*0.0479*q*a^2 / t^2 / vm on a fine mesh (FE-grade tolerance:
+    // discretization + corner sampling + Mindlin-vs-Kirchhoff gap). (b) DETERMINISM of the
+    // merged member+shell screen: shuffling both vectors must not change the removal history.
+    const real Es = 30000.0, nu = 0.3;
+    Material smat(Es, Es / (2.0 * (1.0 + nu)), 2500.0); smat.nu = nu;
+    smat.cap = Capacity::make(10.0, 10.0, 6.0);   // vm = 10
+
+    {   // (a) Navier plate -- compare the CENTRE-ELEMENT screen to the handbook centre moment.
+        // (The plate-WORST D/C deliberately lands elsewhere: the simply-supported corner twist
+        // Mxy = 0.0325 q a^2 gives vM = sqrt(3)*6*Mxy/t^2 ~ 3.38 > centre 2.874, so the global
+        // worst is corner-governed and mesh-sensitive; the centre element is the converged,
+        // handbook-checkable sample.)
+        const real a = 1000.0, t = 10.0, q = 0.01;
+        const real riskExp = 6.0 * 0.0479 * q * a * a / (t * t) / smat.cap.vm;   // 2.874
+        FrameModel m; fixtures::squarePlateShell(m, a, t, 16, q, smat);
+        const SolveResult r = solve(m);
+        real rel = 1.0;
+        if (!r.singular) {
+            size_t best = 0; real bestD = 1e30;                // element centroid nearest (a/2, a/2)
+            for (size_t s = 0; s < m.shells.size(); ++s) {
+                real cx = 0, cy = 0;
+                for (int k = 0; k < 4; ++k) {
+                    const Vec3& p = m.nodes[(size_t)m.nodeIndex(m.shells[s].n[k])].pos;
+                    cx += 0.25 * p.x; cy += 0.25 * p.y;
+                }
+                const real dd = (cx - a / 2) * (cx - a / 2) + (cy - a / 2) * (cy - a / 2);
+                if (dd < bestD) { bestD = dd; best = s; }
+            }
+            const ShellDemandResult d = checkShellSurface(r.shellForces[best], t, smat.cap);
+            rel = relErr(d.risk, riskExp);
+        }
+        addRow("Shell vM screen", "centre-element D/C matches the plate handbook value",
+               "SS square plate UDL: Mx=My=0.0479qa^2 at centre -> vM D/C = 6*0.0479*q*a^2/(t^2*vm)",
+               "relative error vs Navier (centre element)", rel, 2e-2, rel < 2e-2);
+    }
+    {   // (b) merged screen determinism under storage shuffle (members AND shells)
+        Material bmat(210000.0, 80769.0, 7850.0);
+        bmat.cap = Capacity::make(300.0, 300.0, 180.0);
+        Section bsec = Section::Rectangular(100.0, 100.0);
+        auto build = [&](FrameModel& m, bool shuffled) {
+            m = FrameModel{};
+            m.materials = { smat, bmat }; m.sections = { bsec };
+            const real e = 500.0, t = 10.0;
+            Node n0(0, 0, 0, 0); n0.fixAll();
+            Node n3(3, 0, e, 0); n3.fixAll();
+            Node n6(6, 0, 2000, 0); n6.fixAll();               // independent grounded beam root
+            m.nodes = { n0, Node(1, e, 0, 0), Node(2, 2 * e, 0, 0),
+                        n3, Node(4, e, e, 0), Node(5, 2 * e, e, 0),
+                        n6, Node(7, 1000, 2000, 0) };
+            m.shells = { ShellQuad(0, 0, 1, 4, 3, 0, t), ShellQuad(1, 1, 2, 5, 4, 0, t) };
+            m.members = { Member(0, 6, 7, 1, 0) };             // lightly loaded, never governs
+            NodalLoad p2; p2.node = 2; p2.comp[Uz] = -500.0;
+            NodalLoad p5; p5.node = 5; p5.comp[Uz] = -500.0;
+            NodalLoad pb; pb.node = 7; pb.comp[Uz] = -100.0;
+            m.nodalLoads = { p2, p5, pb };
+            if (shuffled) {
+                std::swap(m.shells[0], m.shells[1]);
+                std::reverse(m.nodes.begin() + 1, m.nodes.end());
+            }
+        };
+        CollapseOptions co; co.dlf = 1.0;
+        FrameModel mA; build(mA, false);
+        FrameModel mB; build(mB, true);
+        const CollapseHistory hA = runProgressiveCollapse(mA, co);
+        const CollapseHistory hB = runProgressiveCollapse(mB, co);
+        // NODE reversal renumbers the DOFs, which legitimately changes the LDLT round-off
+        // (~1e-11 here) -- so the contract is: the DISCRETE removal history (ids, modes,
+        // outcome) must be identical, and the D/C values must agree to solver precision.
+        // (Bit-exactness under MEMBER-only shuffles is separately gated in testCollapseDriver.)
+        bool ok = hA.outcome == hB.outcome && hA.steps.size() == hB.steps.size();
+        real maxAbs = ok ? 0.0 : 1.0;
+        if (ok) {
+            for (size_t s = 0; s < hA.steps.size(); ++s) {
+                ok = ok && hA.steps[s].removedMembers == hB.steps[s].removedMembers &&
+                     hA.steps[s].removedShells == hB.steps[s].removedShells &&
+                     hA.steps[s].mode == hB.steps[s].mode;
+                maxAbs = std::max(maxAbs, std::fabs(hA.steps[s].maxDC - hB.steps[s].maxDC));
+            }
+            ok = ok && maxAbs < 1e-9;
+        }
+        addRow("Shell vM screen", "merged member+shell screen: decisions survive renumbering",
+               "shuffled shells + reversed nodes -> identical removal history; D/C to solver precision",
+               "max |D/C difference|", maxAbs, 1e-9, ok);
+    }
+}
+
 void testSafetyAndMargin() {
     // C3 safety factor + C4 criticality (pivot) margin. A cantilever (root moment PL) has the
     // closed-form worst utilization D/C = (PL/W)/cap.bend and safety factor 1/(D/C). pivotMargin
@@ -1069,6 +1159,7 @@ int main() {
     testShellRemoval();
     testConnectivity();
     testCollapseDriver();
+    testShellFailureScreen();
     testSafetyAndMargin();
 
     int failures = 0;

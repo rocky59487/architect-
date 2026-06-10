@@ -28,6 +28,7 @@ struct CollapseOptions {
     // Damage scenario applied at step 0 (GSA-style "suddenly remove these members"). May be
     // empty: step 0 is then just the baseline solve. Unknown ids -> Invalid.
     std::vector<MemberId> initialRemovals;
+    std::vector<int>      initialShellRemovals;   // same, for shell facet ids (stage 3d)
 
     SolveOptions solve;   // pivotTol / enableReleases / useTimoshenko passthrough
 };
@@ -48,6 +49,7 @@ struct CollapseStep {
     int step = 0;
 
     std::vector<MemberId> removedMembers;   // applied at the start of this step
+    std::vector<int>      removedShells;    // shell facets removed (mode == ShellVonMises)
     FailMode mode = FailMode::None;         // governing mode that selected this step's event
                                             // (None for the scenario-imposed step 0)
     real triggerRatio = 0;                  // the D/C that condemned it (0 at step 0)
@@ -84,9 +86,10 @@ struct CollapseHistory {
 // Honest boundaries (LSP-grade): linear elastic between events; no inertia or dynamics
 // beyond the scalar dlf; no plastic redistribution, membrane or catenary action (those make
 // real structures both shed and pick up load nonlinearly -- expect conservative collapse
-// extents, literature places LSP at roughly +/-30%); members are screened and removed,
-// shells participate in stiffness/mass/debris but have no failure criterion yet (stage 3d).
-// Removal order is deterministic: worst D/C, ties broken by smallest member id.
+// extents, literature places LSP at roughly +/-30%). Members are screened by the section
+// screen (checkSection), shells by the surface von Mises screen (checkShellSurface, stage
+// 3d) -- both elastic screening grades, not code checks. Removal order is deterministic:
+// worst D/C, ties broken member-before-shell, then smallest id.
 FRAMECORE_API CollapseHistory runProgressiveCollapse(const FrameModel& model,
                                                      const CollapseOptions& opts = {});
 

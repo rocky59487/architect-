@@ -71,9 +71,15 @@ CollapseHistory runProgressiveCollapse(const FrameModel& model, const CollapseOp
             H.diagnostic = "initialRemovals references missing member id " + std::to_string(id);
             return H;
         }
+    for (int sid : opts.initialShellRemovals)
+        if (shellIndexById(work, sid) < 0) {
+            H.diagnostic = "initialShellRemovals references missing shell id " + std::to_string(sid);
+            return H;
+        }
 
     const ElasticAllowable screen;
     std::vector<MemberId> pending = opts.initialRemovals;
+    std::vector<int> pendingShells = opts.initialShellRemovals;
     FailMode pendingMode = FailMode::None;   // step 0 is scenario-imposed, not D/C-selected
     real pendingRatio = 0;
 
@@ -90,6 +96,11 @@ CollapseHistory runProgressiveCollapse(const FrameModel& model, const CollapseOp
             S.removedMembers.push_back(id);
         }
         pending.clear();
+        for (int sid : pendingShells) {
+            work.shells[(size_t)shellIndexById(work, sid)].active = false;
+            S.removedShells.push_back(sid);
+        }
+        pendingShells.clear();
 
         // 2) fragment cleanup BEFORE solving: anything no longer connected to a support is
         //    debris -- deactivate it wholesale, pin its nodes, drop its loads. Solving first
@@ -131,12 +142,13 @@ CollapseHistory runProgressiveCollapse(const FrameModel& model, const CollapseOp
         S.u = r.u;
         S.pivotMargin = r.pivotMargin;
 
-        // 5) D/C screen over active members (same math as worstUtilization, plus the explicit
-        //    deterministic tie-break: worst ratio first, then smallest member id).
-        bool any = false;
-        real maxDC = 0;
-        MemberId gov = 0;
-        FailMode mode = FailMode::None;
+        // 5) D/C screen: members via the section screen, shells via the surface von Mises
+        //    screen (same math as worstUtilization / worstShellUtilization), with the explicit
+        //    deterministic tie-break: worst ratio, then member-before-shell, then smallest id.
+        bool anyM = false;
+        real maxM = 0;
+        MemberId govM = 0;
+        FailMode modeM = FailMode::None;
         const size_t nM = std::min(work.members.size(), r.memberForces.size());
         for (size_t e = 0; e < nM; ++e) {
             const Member& mem = work.members[e];
@@ -148,16 +160,34 @@ CollapseHistory runProgressiveCollapse(const FrameModel& model, const CollapseOp
             const DemandResult di = screen.checkSection(r.memberForces[e].endI, sec, cap);
             const DemandResult dj = screen.checkSection(r.memberForces[e].endJ, sec, cap);
             const DemandResult& d = (di.risk >= dj.risk) ? di : dj;
-            if (!any || d.risk > maxDC || (d.risk == maxDC && mem.id < gov)) {
-                maxDC = d.risk; gov = mem.id; mode = d.mode;
+            if (!anyM || d.risk > maxM || (d.risk == maxM && mem.id < govM)) {
+                maxM = d.risk; govM = mem.id; modeM = d.mode;
             }
-            any = true;
+            anyM = true;
         }
+        bool anyS = false;
+        real maxS = 0;
+        int govS = 0;
+        const size_t nS = std::min(work.shells.size(), r.shellForces.size());
+        for (size_t s = 0; s < nS; ++s) {
+            const ShellQuad& sh = work.shells[s];
+            if (!sh.active) continue;
+            if (sh.matIdx < 0 || sh.matIdx >= (int)work.materials.size()) continue;
+            const ShellDemandResult d = checkShellSurface(r.shellForces[s], sh.t,
+                                                          work.materials[(size_t)sh.matIdx].cap);
+            if (!anyS || d.risk > maxS || (d.risk == maxS && sh.id < govS)) {
+                maxS = d.risk; govS = sh.id;
+            }
+            anyS = true;
+        }
+
+        const bool any = anyM || anyS;
+        const real maxDC = std::max(anyM ? maxM : real(0), anyS ? maxS : real(0));
         S.maxDC = any ? maxDC : 0;
         S.safetyFactor = any ? ((maxDC > 0) ? real(1) / maxDC : std::numeric_limits<real>::infinity())
                              : real(0);
 
-        // 6) terminal checks, then queue the governing member for the next step
+        // 6) terminal checks, then queue the governing element for the next step
         if (!any || maxDC <= opts.removeThreshold) {
             H.outcome = CollapseOutcome::Stable;
             return H;
@@ -167,8 +197,13 @@ CollapseHistory runProgressiveCollapse(const FrameModel& model, const CollapseOp
             H.diagnostic = "step budget exhausted with D/C still above removeThreshold";
             return H;
         }
-        pending = { gov };
-        pendingMode = mode;
+        if (anyS && (!anyM || maxS > maxM)) {     // ties go member-before-shell
+            pendingShells = { govS };
+            pendingMode = FailMode::ShellVonMises;
+        } else {
+            pending = { govM };
+            pendingMode = modeM;
+        }
         pendingRatio = maxDC;
     }
 }

@@ -52,6 +52,60 @@ DemandResult ElasticAllowable::checkSection(const MemberEndForces& f, const Sect
     return d;
 }
 
+// Stage 3d: shell surface von Mises screen. Membrane stress from the centre resultants
+// (element-constant approximation), bending stress from the centre AND per-corner moments,
+// both faces; the worst sample governs. Mirrors checkSection's ratio() semantics, including
+// "zero capacity under demand = infinite D/C".
+ShellDemandResult checkShellSurface(const ShellElementForces& f, real t, const Capacity& c) {
+    ShellDemandResult out;
+    if (!(t > 0)) return out;   // validate() rejects t <= 0; defensive zero here
+
+    auto vonMises = [](real sx, real sy, real txy) {
+        return std::sqrt(std::max(real(0), sx * sx - sx * sy + sy * sy + 3.0 * txy * txy));
+    };
+    auto ratio = [](real demand, real cap) -> real {
+        if (cap > 0) return demand / cap;
+        return demand > 0 ? std::numeric_limits<real>::infinity() : real(0);
+    };
+
+    const real bend = 6.0 / (t * t);              // sigma_bend = 6*M/t^2 per unit moment
+    const real mx = f.Nxx / t, my = f.Nyy / t, mxy = f.Nxy / t;   // membrane (centre)
+
+    for (int kc = -1; kc < 4; ++kc) {             // -1 = centre, 0..3 = corners
+        const real Mx  = (kc < 0) ? f.Mxx : f.MxxC[kc];
+        const real My  = (kc < 0) ? f.Myy : f.MyyC[kc];
+        const real Mxy = (kc < 0) ? f.Mxy : f.MxyC[kc];
+        for (int face = 0; face < 2; ++face) {    // 0 = top (+bending), 1 = bottom (-bending)
+            const real s = (face == 0) ? real(1) : real(-1);
+            const real r = ratio(vonMises(mx + s * bend * Mx, my + s * bend * My, mxy + s * bend * Mxy), c.vm);
+            if (r > out.risk) { out.risk = r; out.corner = kc; out.top = (face == 0); }
+        }
+    }
+    return out;
+}
+
+// Shell counterpart of worstUtilization (same skip rules: inactive / out-of-range matIdx).
+ShellDemandSummary worstShellUtilization(const FrameModel& model, const SolveResult& r) {
+    ShellDemandSummary out;
+    const size_t nS = std::min(model.shells.size(), r.shellForces.size());
+    bool any = false;
+    real maxDC = 0;
+    for (size_t s = 0; s < nS; ++s) {
+        const ShellQuad& sh = model.shells[s];
+        if (!sh.active) continue;
+        if (sh.matIdx < 0 || sh.matIdx >= (int)model.materials.size()) continue;
+        const ShellDemandResult d = checkShellSurface(r.shellForces[s], sh.t, model.materials[(size_t)sh.matIdx].cap);
+        if (!any || d.risk > maxDC) {
+            maxDC = d.risk;
+            out.governingShell = sh.id;
+        }
+        any = true;
+    }
+    out.valid = any;
+    out.maxDC = any ? maxDC : real(0);
+    return out;
+}
+
 // C3: worst Demand/Capacity over all ACTIVE members (both ends) + the elastic safety factor.
 // Inactive members (element removal) are skipped; members with an out-of-range material/section
 // index are skipped (validate() should have caught those, but be defensive). Pure post-process.

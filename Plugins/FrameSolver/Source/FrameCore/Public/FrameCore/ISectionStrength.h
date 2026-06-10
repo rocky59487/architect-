@@ -5,7 +5,9 @@
 
 namespace frame {
 
-enum class FailMode { None, Crush, Tension, Shear, Bending, Torsion };
+// Governing screening mode. ShellVonMises is the facet surface-stress screen (stage 3d);
+// the others are member section modes. Appended only -- existing switches stay valid.
+enum class FailMode { None, Crush, Tension, Shear, Bending, Torsion, ShellVonMises };
 
 // Member end forces in LOCAL coordinates. N is COMPRESSION-POSITIVE.
 struct MemberEndForces {

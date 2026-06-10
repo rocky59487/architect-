@@ -1328,6 +1328,94 @@ int main() {
         }
     }
 
+    // ---------- F31: shell surface von Mises screen + driver shell removal (stage 3d) ----------
+    {
+        std::printf("[F31] shell von Mises screen + driver shell removal\n");
+        const real Es = 30000.0, nu = 0.3, Gs = Es / (2.0 * (1.0 + nu));
+        Material smat(Es, Gs, 2500.0); smat.nu = nu;
+        smat.cap = Capacity::make(10.0, 10.0, 6.0);            // vm = min(comp,tens) = 10
+
+        // (a) pure-function oracles (no solve): exact synthetic resultants, t = 10
+        {
+            const real t = 10.0;
+            ShellElementForces f{};                            // membrane only: sigma = (3,1,1)
+            f.Nxx = 30.0; f.Nyy = 10.0; f.Nxy = 10.0;
+            const ShellDemandResult d1 = checkShellSurface(f, t, smat.cap);
+            checkClose("membrane vM = sqrt(10)/vm", d1.risk, std::sqrt(10.0) / 10.0, 1e-12);
+            checkTrue("constant field: centre governs", d1.corner == -1, "");
+
+            ShellElementForces b{};                            // bending only: 6M/t^2 = (3,1,1)
+            b.Mxx = 50.0; b.Myy = 50.0 / 3.0; b.Mxy = 50.0 / 3.0;
+            const ShellDemandResult d2 = checkShellSurface(b, t, smat.cap);
+            checkClose("bending vM equals membrane analogue (face-symmetric)", d2.risk, d1.risk, 1e-12);
+
+            ShellElementForces cnr{};                          // a single hot corner governs
+            cnr.MxxC[2] = 50.0;                                // sigma_x = 3 at corner 2 only
+            const ShellDemandResult d3 = checkShellSurface(cnr, t, smat.cap);
+            checkClose("corner peak vM = 0.3", d3.risk, 0.3, 1e-12);
+            checkTrue("governing sample is corner 2", d3.corner == 2, "");
+
+            Capacity zero{};                                   // hand-built capacity: vm = 0
+            checkTrue("vm=0 under demand screens as infinite D/C",
+                      std::isinf(checkShellSurface(f, t, zero).risk), "");
+        }
+
+        // (b) constant-curvature patch (machine-precision FE field): Mxx = -D c, Myy = -nu D c
+        //     -> surface vM = (6 D c / t^2) * sqrt(1 - nu + nu^2), exact at centre AND corners.
+        {
+            const real ap = 1000.0, tp = 10.0, cc = 1e-6;
+            const real D = Es * tp * tp * tp / (12.0 * (1.0 - nu * nu));
+            const real riskExp = (6.0 * D * cc / (tp * tp)) * std::sqrt(1.0 - nu + nu * nu) / smat.cap.vm;
+            FrameModel m; fixtures::platePatchCylindrical(m, ap, tp, 0.0, cc, smat);
+            const SolveResult r = solve(m);
+            checkTrue("patch non-singular", !r.singular, r.diagnostic);
+            const ShellDemandSummary ds = worstShellUtilization(m, r);
+            checkTrue("patch screen valid", ds.valid, "");
+            checkClose("patch vM D/C = (6Dc/t^2) sqrt(1-nu+nu^2)/vm", ds.maxDC, riskExp, 1e-8);
+
+            FrameModel mOff = m;                               // inactive shells are skipped
+            for (auto& sh : mOff.shells) sh.active = false;
+            checkTrue("all shells inactive -> screen invalid", !worstShellUtilization(mOff, solve(mOff)).valid, "");
+        }
+
+        // (c) driver removes the governing facet, the unsupported rest detaches -> Collapsed.
+        //     Cantilever strip of two 500x500 facets clamped at x=0, tip line load: the ROOT
+        //     facet carries the full moment, so it is condemned first (mode ShellVonMises);
+        //     the tip facet then hangs on nothing -> debris with closed-form mass properties.
+        {
+            const real e = 500.0, t = 10.0;
+            FrameModel m;
+            m.materials = { smat };
+            Node n0(0, 0.0, 0.0, 0.0); n0.fixAll();
+            Node n3(3, 0.0, e, 0.0);   n3.fixAll();
+            m.nodes = { n0, Node(1, e, 0.0, 0.0), Node(2, 2.0 * e, 0.0, 0.0),
+                        n3, Node(4, e, e, 0.0),   Node(5, 2.0 * e, e, 0.0) };
+            m.shells = { ShellQuad(0, 0, 1, 4, 3, 0, t),       // root facet
+                         ShellQuad(1, 1, 2, 5, 4, 0, t) };     // tip facet
+            NodalLoad p2; p2.node = 2; p2.comp[Uz] = -500.0;
+            NodalLoad p5; p5.node = 5; p5.comp[Uz] = -500.0;
+            m.nodalLoads = { p2, p5 };
+
+            CollapseOptions co; co.dlf = 1.0;
+            const CollapseHistory h = runProgressiveCollapse(m, co);
+            checkTrue("strip: outcome Collapsed", h.outcome == CollapseOutcome::Collapsed, h.diagnostic);
+            checkTrue("strip: exactly 2 steps", h.steps.size() == 2, "");
+            checkTrue("strip step0 over threshold", h.steps[0].maxDC > 1.0, "");
+            const CollapseStep& s1 = h.steps[1];
+            checkTrue("step1 removes the ROOT facet via ShellVonMises",
+                      s1.removedShells == std::vector<int>({ 0 }) && s1.removedMembers.empty() &&
+                      s1.mode == FailMode::ShellVonMises, "");
+            checkClose("step1 triggerRatio carries the facet D/C", s1.triggerRatio, h.steps[0].maxDC, 1e-12);
+            checkTrue("tip facet detaches as debris", s1.detached.size() == 1 &&
+                      s1.detached[0].shells == std::vector<int>({ 1 }) &&
+                      s1.detached[0].nodes == std::vector<NodeId>({ 1, 2, 4, 5 }), "");
+            if (s1.detached.size() == 1) {
+                checkClose("debris mass = rho*t*a^2", s1.detached[0].mass, 2500.0 * 1e-12 * t * e * e, 1e-12);
+                checkClose("debris com x = 750", s1.detached[0].com.x, 750.0, 1e-12);
+            }
+        }
+    }
+
     std::printf("\n%s  (failures=%d)\n", g_fail == 0 ? "ALL PASS" : "FAILURES", g_fail);
     return g_fail == 0 ? 0 : 1;
 }

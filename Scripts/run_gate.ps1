@@ -9,7 +9,7 @@
 # Usage:  powershell -ExecutionPolicy Bypass -File E:\project\ArchSim\Scripts\run_gate.ps1
 param(
     [switch]$RequireOpenSees,       # CI: fail (not skip) when openseespy is absent
-    [int]$ExpectedUeTests = 31       # guard against silently running only a subset
+    [int]$ExpectedUeTests = 32       # guard against silently running only a subset
 )
 $ErrorActionPreference = 'Continue'
 

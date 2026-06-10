@@ -29,4 +29,27 @@ struct DemandSummary {
 };
 FRAMECORE_API DemandSummary worstUtilization(const FrameModel& model, const SolveResult& r);
 
+// Shell SURFACE-STRESS von Mises screen (stage 3d; elastic, screening-grade):
+//   sigma_x = Nxx/t +/- 6*Mxx/t^2 (top/bottom faces), same for yy / xy,
+//   sigma_vM = sqrt(sx^2 - sx*sy + sy^2 + 3*txy^2),  D/C = sigma_vM / cap.vm.
+// Evaluated at the element CENTRE and at the four CORNERS (membrane taken at the centre --
+// the element-constant approximation -- bending from the per-corner recovery), on both
+// faces; risk = the max over all samples. Honest boundary: transverse shear Qx/Qy is NOT
+// screened (thin-plate regime), no plate buckling, no plate ultimate strength.
+struct ShellDemandResult {
+    real risk   = 0;
+    int  corner = -1;     // governing sample: -1 = centre, 0..3 = corner (ShellQuad::n order)
+    bool top    = true;   // governing face (+bending side)
+};
+FRAMECORE_API ShellDemandResult checkShellSurface(const ShellElementForces& f, real t, const Capacity& c);
+
+// Shell counterpart of worstUtilization: worst surface von Mises D/C over all ACTIVE shells.
+// Same free-post-process contract: a pure function of (model, result).
+struct ShellDemandSummary {
+    real maxDC          = 0;       // worst D/C (0 if no screenable active shell)
+    int  governingShell = 0;       // id of the shell carrying maxDC
+    bool valid          = false;   // false when no active shell could be screened
+};
+FRAMECORE_API ShellDemandSummary worstShellUtilization(const FrameModel& model, const SolveResult& r);
+
 } // namespace frame

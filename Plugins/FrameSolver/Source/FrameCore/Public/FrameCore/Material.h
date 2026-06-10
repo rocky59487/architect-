@@ -13,6 +13,10 @@ struct Capacity {
     real shear = 0;   // allowable shear stress
     real bend  = 0;   // elastic proxy = min(comp, tens)  (NOT a real Mn)
     real tors  = 0;   // elastic proxy = shear
+    real vm    = 0;   // shell surface von Mises allowable (MPa). An elastic proxy like
+                      // `bend` -- NOT a plate ultimate strength. make() defaults it to
+                      // min(comp, tens); a hand-built Capacity{} leaves it 0, which (like
+                      // every other zero capacity) screens as D/C = infinity under demand.
 
     static Capacity make(real comp_, real tens_, real shear_) {
         Capacity c;
@@ -21,6 +25,7 @@ struct Capacity {
         c.shear = shear_;
         c.bend  = std::min(comp_, tens_);
         c.tors  = shear_;
+        c.vm    = std::min(comp_, tens_);
         return c;
     }
 };
