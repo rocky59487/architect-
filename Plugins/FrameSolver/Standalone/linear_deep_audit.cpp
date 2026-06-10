@@ -7,6 +7,7 @@
 #include "FrameCore/ResponseSpectrum.h"
 #include "FrameCore/SelfWeight.h"
 #include "FrameCore/ElasticAllowable.h"
+#include "FrameCore/Connectivity.h"
 #include "FrameTestFixtures.h"
 #include "MITC4ShellElement.h"   // Private seam: element + Eigen types for the element-level audit
 
@@ -831,6 +832,80 @@ void testShellRemoval() {
     }
 }
 
+void testConnectivity() {
+    // 3b fragment mass properties. (a) COMPOSITE inertia oracle: the F29 gate proves single
+    // pieces; here an L of two rods exercises the parallel-axis aggregation across pieces
+    // (the part a single-piece test cannot see). Hand values for two L=1000 rods of mass m
+    // meeting at a right angle: com=(750,250), Ixx=Iyy=5mL^2/24, Izz=5mL^2/12=Ixx+Iyy (planar
+    // consistency), Ixy=-mL^2/8 (tensor matrix entry). (b) DETERMINISM: shuffling the caller's
+    // members/shells vectors must leave every cluster bit-identical (id-sorted accumulation),
+    // because the collapse driver's removal sequence must not depend on storage order.
+    Material mat(210000.0, 80769.0, 7850.0);
+    Section  sec = Section::Rectangular(100.0, 100.0);
+    const real L = 1000.0;
+    const real m = 7850.0 * 1e-12 * sec.A * L;   // 0.0785 tonne per rod
+
+    {   // (a) L-shape composite inertia
+        FrameModel mod; mod.materials = { mat }; mod.sections = { sec };
+        mod.nodes = { Node(0, 0, 0, 0), Node(1, L, 0, 0), Node(2, L, L, 0) };
+        mod.members = { Member(0, 0, 1, 0, 0), Member(1, 1, 2, 0, 0) };
+        const ConnectivityResult c = analyzeConnectivity(mod);
+        bool ok = c.valid && c.detached.size() == 1;
+        real maxRel = 1.0;
+        if (ok) {
+            const FragmentCluster& f = c.detached[0];
+            const real IxxE = 5.0 * m * L * L / 24.0, IzzE = 5.0 * m * L * L / 12.0, IxyE = -m * L * L / 8.0;
+            maxRel = std::max({ relErr(f.inertia[0], IxxE), relErr(f.inertia[1], IxxE),
+                                relErr(f.inertia[2], IzzE), relErr(f.inertia[3], IxyE),
+                                relErr(f.com.x, 750.0), relErr(f.com.y, 250.0),
+                                relErr(f.inertia[2], f.inertia[0] + f.inertia[1]) });
+            ok = maxRel < 1e-12;
+        }
+        addRow("Connectivity", "composite inertia via parallel-axis aggregation",
+               "L of two rods: com=(750,250), Ixx=Iyy=5mL^2/24, Izz=Ixx+Iyy, Ixy=-mL^2/8 (hand)",
+               "max relative error vs hand values", maxRel, 1e-12, ok);
+    }
+    {   // (b) shuffle determinism (mixed members + shells, two detached clusters + one grounded)
+        Material smat(30000.0, 11538.46, 2500.0); smat.nu = 0.3;
+        auto build = [&](FrameModel& mod, bool shuffled) {
+            mod = FrameModel{};
+            mod.materials = { mat, smat }; mod.sections = { sec };
+            Node g0(0, 0, 0, 0); g0.fixAll();
+            mod.nodes = { g0, Node(1, 0, 0, 1000),                        // grounded tower
+                          Node(2, 3000, 0, 0), Node(3, 4000, 0, 0), Node(4, 4000, 1000, 0),   // L fragment
+                          Node(5, 8000, 0, 0), Node(6, 9000, 0, 0), Node(7, 9000, 1000, 0), Node(8, 8000, 1000, 0) };
+            mod.members = { Member(0, 0, 1, 0, 0), Member(1, 2, 3, 0, 0), Member(2, 3, 4, 0, 0) };
+            mod.shells  = { ShellQuad(0, 5, 6, 7, 8, 1, 10.0) };          // free plate fragment
+            if (shuffled) {
+                std::swap(mod.members[0], mod.members[2]);                // storage order changes,
+                std::reverse(mod.nodes.begin() + 2, mod.nodes.end());     // ids untouched
+            }
+        };
+        FrameModel mA; build(mA, false);
+        FrameModel mB; build(mB, true);
+        const ConnectivityResult cA = analyzeConnectivity(mA);
+        const ConnectivityResult cB = analyzeConnectivity(mB);
+        bool ok = cA.valid && cB.valid && cA.detached.size() == 2 && cB.detached.size() == 2 &&
+                  cA.groundedComponents == 1 && cB.groundedComponents == 1;
+        real maxAbs = ok ? 0.0 : 1.0;
+        if (ok) {
+            for (size_t k = 0; k < 2; ++k) {
+                const FragmentCluster& a = cA.detached[k];
+                const FragmentCluster& b = cB.detached[k];
+                ok = ok && a.nodes == b.nodes && a.members == b.members && a.shells == b.shells;
+                maxAbs = std::max(maxAbs, std::fabs(a.mass - b.mass));
+                maxAbs = std::max({ maxAbs, std::fabs(a.com.x - b.com.x), std::fabs(a.com.y - b.com.y),
+                                    std::fabs(a.com.z - b.com.z) });
+                for (int q = 0; q < 6; ++q) maxAbs = std::max(maxAbs, std::fabs(a.inertia[q] - b.inertia[q]));
+            }
+            ok = ok && maxAbs == 0.0;
+        }
+        addRow("Connectivity", "output independent of caller storage order",
+               "shuffled members/nodes vectors -> bit-identical clusters (id-sorted accumulation)",
+               "max |field difference| (want exact 0)", maxAbs, 0.0, ok);
+    }
+}
+
 void testSafetyAndMargin() {
     // C3 safety factor + C4 criticality (pivot) margin. A cantilever (root moment PL) has the
     // closed-form worst utilization D/C = (PL/W)/cap.bend and safety factor 1/(D/C). pivotMargin
@@ -904,6 +979,7 @@ int main() {
     testSparseModal();
     testElementRemoval();
     testShellRemoval();
+    testConnectivity();
     testSafetyAndMargin();
 
     int failures = 0;

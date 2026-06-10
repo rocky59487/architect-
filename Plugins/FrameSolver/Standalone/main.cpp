@@ -10,6 +10,7 @@
 #include "FrameCore/BucklingAnalysis.h"
 #include "FrameCore/ResponseSpectrum.h"
 #include "FrameCore/ModalDynamics.h"
+#include "FrameCore/Connectivity.h"
 #include "FrameTestFixtures.h"
 
 #include <vector>
@@ -1092,6 +1093,110 @@ int main() {
         checkTrue("flipped shell.active rejects stale factor", rStale.singular, rStale.diagnostic);
         checkTrue("stale-reuse diagnostic names the cause",
                   rStale.diagnostic.find("model changed") != std::string::npos, rStale.diagnostic);
+    }
+
+    // ---------- F29: connectivity + debris mass properties (FragmentCluster, Chaos handoff) ----------
+    {
+        // analyzeConnectivity is pure post-processing (graph + closed-form mass geometry), so
+        // every oracle is hand-computable: a free rod's inertia (mL^2/12 about transverse axes
+        // through the com, ~0 about its own axis), the 45-degree rotation pinning the PRODUCT-
+        // of-inertia sign convention (inertia[] stores tensor MATRIX entries, Ixy = -int(xy dm)),
+        // a thin square lamina (ma^2/12 in-plane, ma^2/6 polar -- the two-triangle split is
+        // exact), and the twin-tower/bridge graph for grounded-vs-detached classification.
+        std::printf("[F29] connectivity + fragment mass properties (Chaos handoff)\n");
+
+        // (a) free rod along +x: one detached cluster, rod inertia closed form
+        const real Lr = 2000.0;
+        const real mRod = 7850.0 * 1e-12 * sec.A * Lr;             // 0.157 tonne
+        {
+            FrameModel m; fixtures::prepMatSec(m, mat, sec);
+            m.nodes = { Node(0, 0.0, 0.0, 0.0), Node(1, Lr, 0.0, 0.0) };   // NO supports
+            m.members = { Member(0, 0, 1, 0, 0) };
+            const ConnectivityResult c = analyzeConnectivity(m);
+            checkTrue("free rod: analysis valid", c.valid, "");
+            checkTrue("free rod: 1 detached, 0 grounded, no loose nodes",
+                      c.detached.size() == 1 && c.groundedComponents == 0 && c.looseNodes.empty(), "");
+            const FragmentCluster& f = c.detached[0];
+            checkClose("rod mass = rho*A*L (tonne)", f.mass, mRod, 1e-12);
+            checkClose("rod com x = L/2", f.com.x, Lr / 2.0, 1e-12);
+            checkClose("rod Iyy = mL^2/12", f.inertia[1], mRod * Lr * Lr / 12.0, 1e-12);
+            checkClose("rod Izz = mL^2/12", f.inertia[2], mRod * Lr * Lr / 12.0, 1e-12);
+            checkClose("rod Ixx ~ 0 (slender)", f.inertia[0], 0.0, 1e-12);
+        }
+
+        // (b) the same rod rotated 45 deg in the xy plane: pins the tensor sign convention
+        {
+            const real h = Lr / 2.0 * std::sqrt(2.0);              // = L*cos45
+            FrameModel m; fixtures::prepMatSec(m, mat, sec);
+            m.nodes = { Node(0, 0.0, 0.0, 0.0), Node(1, h, h, 0.0) };
+            m.members = { Member(0, 0, 1, 0, 0) };
+            const ConnectivityResult c = analyzeConnectivity(m);
+            checkTrue("rotated rod: 1 detached cluster", c.valid && c.detached.size() == 1, "");
+            const FragmentCluster& f = c.detached[0];
+            checkClose("rot rod Ixx = mL^2/24", f.inertia[0], mRod * Lr * Lr / 24.0, 1e-9);
+            checkClose("rot rod Izz = mL^2/12", f.inertia[2], mRod * Lr * Lr / 12.0, 1e-9);
+            checkClose("rot rod Ixy = -mL^2/24 (tensor entry)", f.inertia[3], -mRod * Lr * Lr / 24.0, 1e-9);
+        }
+
+        // (c) free square lamina (one shell facet): two-triangle closed form is exact
+        {
+            const real a = 1000.0, t = 10.0, rhoS = 2500.0;
+            const real mPl = rhoS * 1e-12 * t * a * a;             // 0.025 tonne
+            Material smat(30000.0, 11538.46, rhoS); smat.nu = 0.3;
+            FrameModel m; m.materials = { smat };
+            m.nodes = { Node(0, 0.0, 0.0, 0.0), Node(1, a, 0.0, 0.0), Node(2, a, a, 0.0), Node(3, 0.0, a, 0.0) };
+            m.shells = { ShellQuad(0, 0, 1, 2, 3, 0, t) };
+            const ConnectivityResult c = analyzeConnectivity(m);
+            checkTrue("free plate: 1 detached cluster", c.valid && c.detached.size() == 1, "");
+            const FragmentCluster& f = c.detached[0];
+            checkClose("plate mass = rho*t*a^2", f.mass, mPl, 1e-12);
+            checkClose("plate com x = a/2", f.com.x, a / 2.0, 1e-12);
+            checkClose("plate Ixx = m a^2/12", f.inertia[0], mPl * a * a / 12.0, 1e-9);
+            checkClose("plate Izz = m a^2/6 (polar)", f.inertia[2], mPl * a * a / 6.0, 1e-9);
+        }
+
+        // (d) twin towers + bridge: grounded/detached classification + loose nodes
+        {
+            const real Ht = 1000.0;
+            auto buildTowers = [&](FrameModel& m, bool fixB) {
+                m = FrameModel{};
+                fixtures::prepMatSec(m, mat, sec);
+                Node a0(0, 0.0, 0.0, 0.0); a0.fixAll();
+                Node a1(1, 0.0, 0.0, Ht);
+                Node b0(2, 5000.0, 0.0, 0.0); if (fixB) b0.fixAll();
+                Node b1(3, 5000.0, 0.0, Ht);
+                m.nodes = { a0, a1, b0, b1 };
+                m.members = { Member(0, 0, 1, 0, 0),     // tower A
+                              Member(1, 2, 3, 0, 0),     // tower B
+                              Member(2, 1, 3, 0, 0) };   // bridge
+            };
+
+            FrameModel m1; buildTowers(m1, true);
+            const ConnectivityResult c1 = analyzeConnectivity(m1);
+            checkTrue("towers+bridge: one grounded component",
+                      c1.valid && c1.groundedComponents == 1 && c1.detached.empty(), "");
+
+            FrameModel m2 = m1; m2.members[2].active = false;      // cut the bridge, both feet fixed
+            const ConnectivityResult c2 = analyzeConnectivity(m2);
+            checkTrue("cut bridge, both grounded: 2 components, none detached",
+                      c2.groundedComponents == 2 && c2.detached.empty(), "");
+
+            FrameModel m3; buildTowers(m3, false); m3.members[2].active = false;   // tower B unfooted
+            const ConnectivityResult c3 = analyzeConnectivity(m3);
+            checkTrue("unfooted tower detaches as one cluster",
+                      c3.groundedComponents == 1 && c3.detached.size() == 1, "");
+            const FragmentCluster& f = c3.detached[0];
+            checkTrue("cluster lists tower B exactly",
+                      f.nodes == std::vector<NodeId>({ 2, 3 }) && f.members == std::vector<MemberId>({ 1 }) &&
+                      f.shells.empty(), "");
+            checkClose("cluster mass = tower B rod", f.mass, 7850.0 * 1e-12 * sec.A * Ht, 1e-12);
+            checkClose("cluster com z = H/2", f.com.z, Ht / 2.0, 1e-12);
+
+            FrameModel m4 = m3; m4.members[1].active = false;      // kill tower B too -> bare free nodes
+            const ConnectivityResult c4 = analyzeConnectivity(m4);
+            checkTrue("bare free nodes land in looseNodes",
+                      c4.detached.empty() && c4.looseNodes == std::vector<NodeId>({ 2, 3 }), "");
+        }
     }
 
     std::printf("\n%s  (failures=%d)\n", g_fail == 0 ? "ALL PASS" : "FAILURES", g_fail);
