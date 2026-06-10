@@ -11,9 +11,9 @@
 
 namespace frame {
 
-// Owns the whole structural model. Materials/Sections are referenced by pointer
-// from Members, so the caller must keep them alive for the model's lifetime
-// (the fixtures store them inside the model via these vectors).
+// Owns the whole structural model. Materials/Sections are referenced by INDEX
+// (matIdx/secIdx) from Members and ShellQuads — never by pointer — so growing any
+// vector can never dangle a reference; validate() range-checks the indices.
 struct FrameModel {
     std::vector<Node>            nodes;
     std::vector<Member>          members;

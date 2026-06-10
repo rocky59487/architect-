@@ -13,12 +13,15 @@ The engine is deliberately small, **rigorously validated**, and **engine-agnosti
 public API uses only plain C++/POD types (no UE, no Eigen leakage), so the same source
 compiles as a standalone console gate *and* as an Unreal Engine module.
 
-> **Status:** clean, audited baseline + a full linear-analysis suite. Verification gate is green
-> (`standalone ALL PASS (F1–F25)` · `26 UE automation tests` · `OpenSees strict cross-validation
-> PASS`), including same-element agreement with OpenSees `ShellMITC4` (~1e-10 on flat/tilted
-> plates; ~1e-7–1e-8 on skewed + warped meshes) and natural frequencies vs OpenSees `eigen`
-> (~1e-11). Note: these are the *measured* agreements; the gate **tolerances** are looser on
-> purpose (shell `1e-7`, modal `1e-4`) to leave float / library-version headroom.
+> **Status:** clean, audited baseline + a full linear-analysis suite + a **progressive-collapse
+> driver** (element removal, debris connectivity for the physics-engine handoff, shell failure
+> screen, event-to-event plastic hinges). Verification gate is green (`standalone ALL PASS
+> (F1–F33)` · `34 UE automation tests` · `OpenSees strict cross-validation PASS` · `deep audit
+> 62 checks`), including same-element agreement with OpenSees `ShellMITC4` (~1e-10 on
+> flat/tilted plates; ~1e-7–1e-8 on skewed + warped meshes), natural frequencies vs OpenSees
+> `eigen` (~1e-11), and a formed-hinge state vs an independent OpenSees formulation (~1e-12).
+> Note: these are the *measured* agreements; the gate **tolerances** are looser on purpose
+> (shell `1e-7`, modal `1e-4`) to leave float / library-version headroom.
 
 ---
 
@@ -51,6 +54,17 @@ compiles as a standalone console gate *and* as an Unreal Engine module.
 | **Response spectrum (seismic)** | `solveResponseSpectrum` modal participation + SRSS/CQC; the spectrum curve is a caller-supplied input (not tied to one code) |
 | **Real-time transient** | `solveModalStepResponse` modal superposition + Newmark-β; O(nModes)/step for UE5 sway/vibration |
 
+### Progressive collapse (the C-line)
+
+| Capability | Notes |
+|---|---|
+| **Element removal** | `Member.active` / `ShellQuad.active`: an inactive element leaves K, sheds its baked loads, recovers zero forces, and is part of the `solveLoad` reuse fingerprint |
+| **Safety margins** | `worstUtilization` (worst D/C + elastic safety factor 1/maxDC) and `pivotMargin` (min/max LDLᵀ pivot — a continuous proximity-to-mechanism warning) |
+| **Debris connectivity** | `analyzeConnectivity`: grounded vs detached components of the active-element graph; each detached `FragmentCluster` carries id lists + closed-form mass / com / inertia tensor — the **UE5 Chaos handoff** data (rigid-body fall/rolling is the physics engine's job, by design) |
+| **Collapse driver** | `runProgressiveCollapse`: GSA-style LSP as sequential linear analysis — remove the governing element while D/C > threshold, clean up detached debris each step (pin + shed loads), re-factor, re-solve; dual terminal (Stable / Collapsed) + step budget; `dlf` sudden-removal amplification (default 2.0); `initialRemovals` scenarios; deterministic tie-breaks; per-step displacement snapshots for replay |
+| **Shell failure screen** | `checkShellSurface` / `worstShellUtilization`: surface von Mises (σ = N/t ± 6M/t², centre + corners, both faces) vs `Capacity.vm`; the driver can condemn facets |
+| **Plastic hinges (event-to-event)** | `PlasticHinge` model state (release + signed residual `Mp = fy·Z`, both channels documented in `Hinge.h`); `CollapseOptions.plasticHinges` makes hinge-capable members ductile in bending — hinges form at `|M| ≥ Mp` until a hinge **mechanism**; reproduces the classic `w* = 16Mp/L²` plastic collapse load to ±2 % |
+
 ### Scope boundaries (read this — the engine is honest about what it is *not*)
 
 - The D/C check is an **elastic / allowable-stress screen**, **not** RC ultimate strength.
@@ -79,10 +93,15 @@ compiles as a standalone console gate *and* as an Unreal Engine module.
   **dense** (suited to the modest models of an interactive sim; a sparse Lanczos path is the
   scale-up). The response spectrum does the modal combination only — the **code spectrum curve
   is an input**, not built in.
-- **No material nonlinearity** (RC fiber sections, plastic hinges, pushover / plastic collapse).
-  This is deliberately out of scope: it is the most failure-prone, easiest-to-over-claim layer
-  and the furthest from the live-load / interactive goal. (Earlier experimental versions were
-  removed in the cleanup.)
+- The **progressive-collapse driver is LSP-grade sequential linear analysis**, not nonlinear
+  collapse simulation: linear elastic between events, no inertia beyond the scalar `dlf`, no
+  membrane/catenary action (literature places LSP at roughly ±30 % on collapse extent — expect
+  conservative results). The **plastic hinge** layer is the textbook event-to-event device
+  (every solve stays linear): no hinge unloading/reversal, uniaxial `Mp`, no N–M interaction,
+  zero hinge length — it is **not** true elastoplasticity, and there are still **no fiber
+  sections / pushover** (deliberately excluded). The shell screen checks surface von Mises
+  only (no transverse-shear screen, no plate buckling/ultimate). Debris fragments are handed
+  to the physics layer **from rest** (a static engine estimates no separation velocities).
 
 ---
 
@@ -208,16 +227,18 @@ docs/ARCHITECTURE.md                    data model, solve pipeline, conventions
 
 ## Roadmap
 
-The continuous-surface goal (MITC4 shell) and the full **linear-analysis suite** are done: load
-cases + combinations + self-weight, factorize-once-solve-many, prescribed settlement, pattern
-loading + envelopes, influence lines / moving loads, modal analysis, linear buckling / P-Δ,
-response-spectrum (seismic), and modal-superposition real-time dynamics — each behind the
-existing `IElement` / `PreparedSystem` seams and gated by its own independent oracle (closed-form
-+ OpenSees cross-checks). Possible next steps, in rough order of value: a warping-aware /
-higher-order shell to cut the flat-facet error on strongly curved surfaces; a sparse Lanczos
-eigensolver for larger modal models; and — only if a clear need appears, and with its own
-adversarial verification — a **material-nonlinearity** layer (RC fiber sections / plastic hinges),
-which is deliberately excluded for now as the most over-claim-prone and goal-distant addition.
+The continuous-surface goal (MITC4 shell), the full **linear-analysis suite** (load cases /
+combinations / self-weight, factorize-once-solve-many, settlement, envelopes, influence lines,
+modal, buckling, response spectrum, real-time dynamics) and the **progressive-collapse line**
+(element removal → safety margins → debris connectivity → LSP collapse driver → shell failure
+→ event-to-event plastic hinges) are done — each behind the existing `IElement` /
+`PreparedSystem` seams and gated by its own independent oracle (closed-form + OpenSees
+cross-checks). Possible next steps, in rough order of value: the UE5 visualization layer
+consuming the POD results (collapse replay, `FragmentCluster` → Chaos debris, D/C heat-maps);
+per-member force diagrams (BMD/SFD) and redundancy reporting for the UI; shell geometric
+stiffness (plate buckling); a sparse shift-invert buckling solver; a warping-aware /
+higher-order membrane (QM6) to cut the curved-surface error. True material nonlinearity
+(fiber sections / pushover) stays deliberately excluded.
 
 ## License / use
 

@@ -169,6 +169,28 @@ The analysis modules (each a free function + POD result, **no `solve()` flag blo
 | Buckling | `solveBuckling` (`BucklingAnalysis.h`) | `(-Kg_ff)φ = γ K_ff φ`, λ_cr = 1/γ_max |
 | Response spectrum | `solveResponseSpectrum` (`ResponseSpectrum.h`) | modal participation + SRSS/CQC |
 | Transient | `solveModalStepResponse` (`ModalDynamics.h`) | Newmark-β per modal coordinate |
+| Debris connectivity | `analyzeConnectivity` (`Connectivity.h`) | union-find over the active-element graph; grounded = reaches a fixed DOF; detached `FragmentCluster` = id lists + closed-form mass/com/inertia (rod + two-triangle lamina), id-sorted accumulation for bit-determinism |
+| Collapse driver | `runProgressiveCollapse` (`Collapse.h`) | sequential linear analysis: apply event → connectivity cleanup (pin debris nodes, shed their loads) → fresh factor + solve → screen → next event; dual terminal Stable/Collapsed + MaxSteps; deterministic tie-breaks |
+| Plastic hinges | `PlasticHinge` (`Hinge.h`, model state) + `CollapseOptions.plasticHinges` | release + signed residual `Mp = fy·Z` baked into the element condensation (element channel) + joint moment `−Mp·ê` (node channel); event-to-event until a hinge mechanism |
+
+### The collapse line (C1–C5, stages 1–4b)
+
+- **Element removal**: `Member.active` / `ShellQuad.active` — an inactive element is skipped at
+  assembly (no K, no baked loads), recovers zero forces, and is **fingerprinted** (flipping it
+  rejects a stale `PreparedSystem` reuse). Result rows are id-stamped even for inactive elements
+  (an id-keyed consumer must never read the wrong row).
+- **Safety margins**: `worstUtilization` (C3) and `SolveResult.pivotMargin` (C4, min/max |LDLᵀ
+  pivot| — scale-invariant, NOT a 0..1 health score; read it relatively / as distance above
+  `pivotTol`).
+- **Debris for the physics engine**: the driver never simulates falling — a detached
+  `FragmentCluster` (nodes/members/shells + mass, com, inertia tensor about the com in global
+  axes, tensor MATRIX entries) is the handoff to UE5 Chaos, which owns rigid-body fall/rolling.
+  Fragments leave from REST (a static engine estimates no separation velocity — documented, not
+  hidden). Detached nodes are temporarily pinned (mathematically inert: nothing couples to them)
+  so the grounded remainder never reads a spurious mechanism, and their loads leave with them.
+- **Honesty**: the driver is GSA-LSP-grade (linear between events, scalar `dlf` for dynamics,
+  no membrane/catenary); the hinge layer is event-to-event sequential linear analysis (no
+  unloading, uniaxial Mp, no N–M interaction) — every solve stays linear by construction.
 
 Units for mass/self-weight: the engine is consistent **N-mm-tonne-s**, so `Material.rho` (kg/m³)
 is bridged by `×1e-12` (→ tonne/mm³). The self-weight and modal oracles validate this conversion
