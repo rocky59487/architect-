@@ -73,7 +73,7 @@ def run_frame_cli(model):
                                                   " ".join(str(v) for v in fp)))
     for e in model["members"]:
         rv = e["refvec"]
-        lines.append(f"MEMBER {e['id']} {e['i']} {e['j']} {e['mat']} {e['sec']} {rv[0]} {rv[1]} {rv[2]}")
+        lines.append(f"MEMBER {e['id']} {e['i']} {e['j']} {e['mat']} {e['sec']} {rv[0]} {rv[1]} {rv[2]} {e.get('active', 1)}")
     for l in model.get("nloads", []):
         c = l["comp"]
         lines.append(f"NLOAD {l['node']} {c[0]} {c[1]} {c[2]} {c[3]} {c[4]} {c[5]}")
@@ -109,6 +109,8 @@ def run_opensees(model):
         ops.fix(n["id"], *mask)
 
     for e in model["members"]:
+        if not e.get("active", 1):
+            continue   # our side deactivates the member; OpenSees simply never builds it
         pi = next(nn for nn in model["nodes"] if nn["id"] == e["i"])
         pj = next(nn for nn in model["nodes"] if nn["id"] == e["j"])
         axis = (pj["x"] - pi["x"], pj["y"] - pi["y"], pj["z"] - pi["z"])
@@ -156,7 +158,9 @@ def run_opensees(model):
     for e in model["members"]:
         # localForce (NOT eleForce, which is GLOBAL) -> axial along local x + local moments,
         # directly comparable to our compression-positive local end forces (abs / resultant).
-        mf[e["id"]] = ops.eleResponse(e["id"] + 1, "localForce")
+        # An inactive member has no OpenSees element; it reads zero, which is exactly our
+        # removed-member force convention -- so the comparison also gates that convention.
+        mf[e["id"]] = ops.eleResponse(e["id"] + 1, "localForce") if e.get("active", 1) else [0.0] * 12
     return ok, disp, mf
 
 
@@ -268,6 +272,35 @@ def model_settlement():
     mats = [dict(E=210000.0, G=80769.0, rho=7850.0)]
     return dict(name="prescribed settlement (fixed-fixed, end settles)", materials=mats,
                 sections=[sec], nodes=nodes, members=members, nloads=[], analytic=None)
+
+
+def model_collapse_states():
+    # Collapse stage 3c cross-check: the driver's per-step states are ordinary linear solves of
+    # a partially-removed topology, so each state must match OpenSees built WITHOUT the removed
+    # members. State A = full propped cantilever (indeterminate); state B = the same model with
+    # the prop DEACTIVATED on our side (active=0 token) vs simply omitted on the OpenSees side
+    # (its foot node remains, fully fixed and element-less). The removal SEQUENCE itself is
+    # gated by the F30 closed-form oracles; this leg gates the per-step linear states.
+    sec = square_section(100.0)
+    L, h, P = 3000.0, 1000.0, 40000.0
+    nodes = [
+        dict(id=0, x=0.0,     y=0.0, z=0.0, fix=[1, 1, 1, 1, 1, 1]),
+        dict(id=1, x=L / 2.0, y=0.0, z=0.0, fix=[0, 0, 0, 0, 0, 0]),
+        dict(id=2, x=L,       y=0.0, z=0.0, fix=[0, 0, 0, 0, 0, 0]),
+        dict(id=3, x=L,       y=0.0, z=-h,  fix=[1, 1, 1, 1, 1, 1]),
+    ]
+    def members(prop_active):
+        return [dict(id=0, i=0, j=1, mat=0, sec=0, refvec=(0, 0, 1)),
+                dict(id=1, i=1, j=2, mat=0, sec=0, refvec=(0, 0, 1)),
+                dict(id=2, i=3, j=2, mat=0, sec=0, refvec=refvec_for((L, 0, -h), (L, 0, 0)),
+                     active=prop_active)]
+    nloads = [dict(node=1, comp=[0, 0, -P, 0, 0, 0])]
+    mats = [dict(E=210000.0, G=80769.0, rho=7850.0)]
+    full = dict(name="collapse state A: propped cantilever (full)", materials=mats,
+                sections=[sec], nodes=nodes, members=members(1), nloads=nloads, analytic=None)
+    cut = dict(name="collapse state B: prop removed by flag (vs OpenSees omission)", materials=mats,
+               sections=[sec], nodes=nodes, members=members(0), nloads=nloads, analytic=None)
+    return [full, cut]
 
 
 # ----------------------------------------------------------------- shells (MITC4)
@@ -474,7 +507,8 @@ def main():
     print(f"  tolerances: {'RELAXED (report)' if relaxed else 'STRICT (gate)'}  "
           f"disp={TOL_DISP_VS_OS:.0e} force={TOL_FORCE_VS_OS:.0e} analytic={TOL_VS_ANALYTIC:.0e}")
 
-    models = [model_cantilever3d(), model_cantilever_rect(), model_portal_rc(), model_settlement()]
+    models = [model_cantilever3d(), model_cantilever_rect(), model_portal_rc(), model_settlement()] \
+             + model_collapse_states()
     failures = 0
     print("=" * 64)
     print(" #14 OpenSees offline cross-validation")

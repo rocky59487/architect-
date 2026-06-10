@@ -11,6 +11,7 @@
 #include "FrameCore/ResponseSpectrum.h"
 #include "FrameCore/ModalDynamics.h"
 #include "FrameCore/Connectivity.h"
+#include "FrameCore/Collapse.h"
 #include "FrameTestFixtures.h"
 
 #include <vector>
@@ -1196,6 +1197,134 @@ int main() {
             const ConnectivityResult c4 = analyzeConnectivity(m4);
             checkTrue("bare free nodes land in looseNodes",
                       c4.detached.empty() && c4.looseNodes == std::vector<NodeId>({ 2, 3 }), "");
+        }
+    }
+
+    // ---------- F30: progressive-collapse driver (C2) — sequence, fragments, terminals ----------
+    {
+        std::printf("[F30] progressive-collapse driver (C2) — LSP sequential linear analysis\n");
+
+        // (A) hanging chain -> STABLE terminal. A vertical chain (stout-thin-stout) under a tip
+        // pull: the thin middle link's D/C = |N|/(A*cap.tens) = 150000/(400*300) = 1.25 exactly,
+        // so the driver removes it; the lower half then dangles (no support) -> detached debris
+        // with closed-form mass properties, its load LEAVES with it, and the surviving upper
+        // link reads exactly zero force -> Stable. Any load leak would show as maxDC != 0.
+        {
+            Section secThin = Section::Rectangular(20.0, 20.0);    // A = 400
+            const real Lc = 1000.0, P = 150000.0;
+            auto buildChain = [&](FrameModel& m) {
+                m = FrameModel{};
+                m.materials = { mat };                             // cap.tens = 300
+                m.sections  = { sec, secThin };
+                Node n0(0, 0.0, 0.0, 0.0); n0.fixAll();            // hung from the top
+                m.nodes = { n0, Node(1, 0.0, 0.0, -Lc), Node(2, 0.0, 0.0, -2.0 * Lc), Node(3, 0.0, 0.0, -3.0 * Lc) };
+                m.members = { Member(0, 0, 1, 0, 0),
+                              Member(1, 1, 2, 0, 1),               // the thin link (A = 400)
+                              Member(2, 2, 3, 0, 0) };
+                NodalLoad p; p.node = 3; p.comp[Uz] = -P; m.nodalLoads = { p };
+            };
+
+            FrameModel m; buildChain(m);
+            CollapseOptions co; co.dlf = 1.0;
+            const CollapseHistory h = runProgressiveCollapse(m, co);
+            checkTrue("chain: outcome Stable", h.outcome == CollapseOutcome::Stable, h.diagnostic);
+            checkTrue("chain: exactly 2 steps", h.steps.size() == 2, "");
+            checkClose("chain step0 maxDC = P/(A cap) (closed form)", h.steps[0].maxDC, 1.25, 1e-9);
+            checkTrue("chain step0 is the baseline (no removals)",
+                      h.steps[0].removedMembers.empty() && h.steps[0].detached.empty() && h.steps[0].solved, "");
+            const CollapseStep& s1 = h.steps[1];
+            checkTrue("chain step1 removes the thin link (id 1, Tension)",
+                      s1.removedMembers == std::vector<MemberId>({ 1 }) && s1.mode == FailMode::Tension, "");
+            checkClose("chain step1 triggerRatio = 1.25", s1.triggerRatio, 1.25, 1e-9);
+            checkTrue("chain step1 detaches the lower half", s1.detached.size() == 1, "");
+            if (s1.detached.size() == 1) {
+                const FragmentCluster& f = s1.detached[0];
+                checkTrue("debris lists {n2,n3 / M2}",
+                          f.nodes == std::vector<NodeId>({ 2, 3 }) && f.members == std::vector<MemberId>({ 2 }), "");
+                checkClose("debris mass = rho*A*L", f.mass, 7850.0 * 1e-12 * sec.A * Lc, 1e-12);
+                checkClose("debris com z = -2500", f.com.z, -2500.0, 1e-12);
+                checkClose("debris Ixx = mL^2/12", f.inertia[0], (7850.0 * 1e-12 * sec.A * Lc) * Lc * Lc / 12.0, 1e-9);
+            }
+            checkClose("chain step1 maxDC = 0 (load left with the debris)", s1.maxDC, 0.0, 1e-12);
+            checkTrue("chain step1 safetyFactor = +inf", std::isinf(s1.safetyFactor) && s1.safetyFactor > 0, "");
+
+            // dlf is a pure load scale on a linear model: D/C doubles exactly
+            CollapseOptions co2 = co; co2.dlf = 2.0;
+            const CollapseHistory h2 = runProgressiveCollapse(m, co2);
+            checkClose("dlf=2 doubles step0 maxDC exactly", h2.steps[0].maxDC, 2.50, 1e-12);
+
+            // step budget: the baseline step finds D/C > threshold but may not remove -> MaxSteps
+            CollapseOptions co3 = co; co3.maxSteps = 1;
+            const CollapseHistory h3 = runProgressiveCollapse(m, co3);
+            checkTrue("maxSteps=1 -> MaxSteps outcome", h3.outcome == CollapseOutcome::MaxSteps && h3.steps.size() == 1,
+                      h3.diagnostic);
+
+            // scenario API: remove the thin link at step 0 -> immediate debris, then Stable
+            CollapseOptions co4 = co; co4.initialRemovals = { 1 };
+            const CollapseHistory h4 = runProgressiveCollapse(m, co4);
+            checkTrue("initialRemovals: one-step Stable with debris",
+                      h4.outcome == CollapseOutcome::Stable && h4.steps.size() == 1 &&
+                      h4.steps[0].removedMembers == std::vector<MemberId>({ 1 }) &&
+                      h4.steps[0].mode == FailMode::None && h4.steps[0].detached.size() == 1, h4.diagnostic);
+
+            // bad scenario id -> Invalid
+            CollapseOptions co5 = co; co5.initialRemovals = { 99 };
+            checkTrue("unknown initialRemovals id -> Invalid",
+                      runProgressiveCollapse(m, co5).outcome == CollapseOutcome::Invalid, "");
+        }
+
+        // (B) propped cantilever cascade -> COLLAPSED terminal. Beam (fixed at n0, P at n1) +
+        // a pin-ended prop under n2 (both bending pairs released -> a pure axial strut, so the
+        // force-method closed form is exact): R = d10/f11 with d10 = P a^2 (3L-a)/(6EI),
+        // f11 = L^3/(3EI) + h/(E A_p). Weak prop crushes first (D/C ~ 1.99), then the beam root
+        // (D/C 1.2), then the floating remainder detaches -> nothing grounded -> Collapsed.
+        {
+            Material matProp(E, G, 7850.0);
+            matProp.cap = Capacity::make(5.0, 300.0, 180.0);       // weak in compression only
+            Section secProp = Section::Circular(20.0);             // A = pi*400
+            const real Lb = 3000.0, aP = 1500.0, hP = 1000.0, P = 40000.0;
+            const real EIv = E * sec.Iz;
+            const real d10 = P * aP * aP * (3.0 * Lb - aP) / (6.0 * EIv);
+            const real f11 = Lb * Lb * Lb / (3.0 * EIv) + hP / (E * secProp.A);
+            const real R   = d10 / f11;                            // prop force (compression)
+            const real dcProp = (R / secProp.A) / matProp.cap.comp;        // ~1.988
+            const real dcRoot = (P * aP / sec.Wz()) / mat.cap.bend;        // = 1.2 after prop loss
+
+            FrameModel m;
+            m.materials = { mat, matProp };
+            m.sections  = { sec, secProp };
+            Node n0(0, 0.0, 0.0, 0.0); n0.fixAll();
+            Node n3(3, Lb, 0.0, -hP);  n3.fixAll();
+            m.nodes = { n0, Node(1, aP, 0.0, 0.0), Node(2, Lb, 0.0, 0.0), n3 };
+            Member prop(2, 3, 2, 1, 1);
+            prop.release[4] = prop.release[5] = prop.release[10] = prop.release[11] = true;   // pin-pin bending
+            m.members = { Member(0, 0, 1, 0, 0), Member(1, 1, 2, 0, 0), prop };
+            NodalLoad p; p.node = 1; p.comp[Uz] = -P; m.nodalLoads = { p };
+
+            CollapseOptions co; co.dlf = 1.0; co.solve.enableReleases = true;
+            const CollapseHistory h = runProgressiveCollapse(m, co);
+            checkTrue("cascade: outcome Collapsed", h.outcome == CollapseOutcome::Collapsed, h.diagnostic);
+            checkTrue("cascade: exactly 3 steps", h.steps.size() == 3, "");
+            checkClose("step0 maxDC = prop force-method closed form", h.steps[0].maxDC, dcProp, 1e-9);
+            const CollapseStep& s1 = h.steps[1];
+            checkTrue("step1 crushes the prop (id 2)",
+                      s1.removedMembers == std::vector<MemberId>({ 2 }) && s1.mode == FailMode::Crush, "");
+            checkClose("step1 triggerRatio = prop D/C", s1.triggerRatio, dcProp, 1e-9);
+            checkClose("step1 maxDC = cantilever root (PL/W)/cap", s1.maxDC, dcRoot, 1e-9);
+            const CollapseStep& s2 = h.steps[2];
+            checkTrue("step2 severs the beam root (id 0)", s2.removedMembers == std::vector<MemberId>({ 0 }), "");
+            checkClose("step2 triggerRatio = root D/C", s2.triggerRatio, dcRoot, 1e-9);
+            checkTrue("step2: floating remainder detaches as debris",
+                      s2.detached.size() == 1 && !s2.solved &&
+                      s2.detached[0].members == std::vector<MemberId>({ 1 }) &&
+                      s2.detached[0].nodes == std::vector<NodeId>({ 1, 2 }), "");
+            if (s2.detached.size() == 1) {
+                checkClose("debris mass = rho*A*(L-a)", s2.detached[0].mass, 7850.0 * 1e-12 * sec.A * (Lb - aP), 1e-12);
+                checkClose("debris com x = 2250", s2.detached[0].com.x, 2250.0, 1e-12);
+            }
+            bool uZero = !s2.u.empty();
+            for (real v : s2.u) uZero = uZero && (v == 0.0);
+            checkTrue("terminal step snapshot reads all-zero", uZero, "");
         }
     }
 

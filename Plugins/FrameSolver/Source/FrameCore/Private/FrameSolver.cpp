@@ -258,6 +258,11 @@ SolveResult solveLoad(const PreparedSystem& prepared, const FrameModel& model) {
 
     R.memberForces.resize(model.members.size());
     R.shellForces.resize(model.shells.size());
+    // Stamp every row's id, including INACTIVE elements (their forces stay zero but recover()
+    // never visits them): leaving the default id 0 in a vector that is parallel to the model
+    // would make any consumer keying results by id silently read the wrong element.
+    for (size_t e = 0; e < model.members.size(); ++e) R.memberForces[e].member = model.members[e].id;
+    for (size_t s = 0; s < model.shells.size(); ++s)  R.shellForces[s].shell   = model.shells[s].id;
     for (const auto& el : S.elems) el->recover(u, R);
     R.pivotMargin = S.pivotMargin;   // C4: report the factorization's criticality margin
     return R;

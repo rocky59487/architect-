@@ -8,6 +8,7 @@
 #include "FrameCore/SelfWeight.h"
 #include "FrameCore/ElasticAllowable.h"
 #include "FrameCore/Connectivity.h"
+#include "FrameCore/Collapse.h"
 #include "FrameTestFixtures.h"
 #include "MITC4ShellElement.h"   // Private seam: element + Eigen types for the element-level audit
 
@@ -906,6 +907,93 @@ void testConnectivity() {
     }
 }
 
+void testCollapseDriver() {
+    // 3c progressive-collapse driver invariants beyond the F30 closed-form sequence oracles:
+    // (a) dlf scales FORCE loads only -- a settlement-driven model must be BIT-identical under
+    //     any dlf (prescribed values are kinematic, not forces);
+    // (b) the removal sequence must not depend on the caller's vector storage order;
+    // (c) the driver's internal D/C screen must agree with the PUBLIC worstUtilization to the
+    //     bit on the baseline step (two implementations of the same math must not drift).
+    Material mat(210000.0, 80769.0, 7850.0);
+    mat.cap = Capacity::make(300.0, 300.0, 180.0);
+    Section sec = Section::Rectangular(100.0, 100.0);
+
+    {   // (a) settlement-only model: dlf=1 vs dlf=2 bit-identical
+        FrameModel m; m.materials = { mat }; m.sections = { sec };
+        Node n0(0, 0, 0, 0); n0.fixAll();
+        Node n1(1, 1000, 0, 0);
+        Node n2(2, 2000, 0, 0); n2.fixAll(); n2.prescribed[Uz] = -5.0;   // settles
+        m.nodes = { n0, n1, n2 };
+        m.members = { Member(0, 0, 1, 0, 0), Member(1, 1, 2, 0, 0) };
+        CollapseOptions c1; c1.dlf = 1.0;
+        CollapseOptions c2; c2.dlf = 2.0;
+        const CollapseHistory h1 = runProgressiveCollapse(m, c1);
+        const CollapseHistory h2 = runProgressiveCollapse(m, c2);
+        bool ok = !h1.steps.empty() && h1.steps.size() == h2.steps.size() && h1.steps[0].solved;
+        real maxAbs = ok ? 0.0 : 1.0;
+        if (ok) {
+            maxAbs = std::fabs(h1.steps[0].maxDC - h2.steps[0].maxDC);
+            for (size_t k = 0; k < h1.steps[0].u.size(); ++k)
+                maxAbs = std::max(maxAbs, std::fabs(h1.steps[0].u[k] - h2.steps[0].u[k]));
+            ok = maxAbs == 0.0;
+        }
+        addRow("Collapse driver", "dlf never scales prescribed displacements",
+               "settlement-only model: dlf=1 vs dlf=2 -> bit-identical u and D/C",
+               "max |difference| (want exact 0)", maxAbs, 0.0, ok);
+    }
+    {   // (b) storage-order determinism of the full removal sequence
+        Material matProp(210000.0, 80769.0, 7850.0);
+        matProp.cap = Capacity::make(5.0, 300.0, 180.0);
+        Section secProp = Section::Circular(20.0);
+        auto build = [&](FrameModel& m, bool shuffled) {
+            m = FrameModel{};
+            m.materials = { mat, matProp }; m.sections = { sec, secProp };
+            Node n0(0, 0, 0, 0); n0.fixAll();
+            Node n3(3, 3000, 0, -1000); n3.fixAll();
+            m.nodes = { n0, Node(1, 1500, 0, 0), Node(2, 3000, 0, 0), n3 };
+            Member prop(2, 3, 2, 1, 1);
+            prop.release[4] = prop.release[5] = prop.release[10] = prop.release[11] = true;
+            m.members = { Member(0, 0, 1, 0, 0), Member(1, 1, 2, 0, 0), prop };
+            if (shuffled) std::swap(m.members[0], m.members[2]);
+            NodalLoad p; p.node = 1; p.comp[Uz] = -40000.0; m.nodalLoads = { p };
+        };
+        CollapseOptions co; co.dlf = 1.0; co.solve.enableReleases = true;
+        FrameModel mA; build(mA, false);
+        FrameModel mB; build(mB, true);
+        const CollapseHistory hA = runProgressiveCollapse(mA, co);
+        const CollapseHistory hB = runProgressiveCollapse(mB, co);
+        bool ok = hA.outcome == hB.outcome && hA.steps.size() == hB.steps.size();
+        real maxAbs = ok ? 0.0 : 1.0;
+        if (ok) {
+            for (size_t s = 0; s < hA.steps.size(); ++s) {
+                ok = ok && hA.steps[s].removedMembers == hB.steps[s].removedMembers &&
+                     hA.steps[s].mode == hB.steps[s].mode;
+                maxAbs = std::max(maxAbs, std::fabs(hA.steps[s].maxDC - hB.steps[s].maxDC));
+                maxAbs = std::max(maxAbs, std::fabs(hA.steps[s].triggerRatio - hB.steps[s].triggerRatio));
+            }
+            ok = ok && maxAbs == 0.0;
+        }
+        addRow("Collapse driver", "removal sequence independent of storage order",
+               "shuffled members vector -> identical removal ids, modes, and D/C bits",
+               "max |D/C difference| (want exact 0)", maxAbs, 0.0, ok);
+    }
+    {   // (c) driver screen == public worstUtilization on the baseline step
+        FrameModel m; m.materials = { mat }; m.sections = { sec };
+        Node n0(0, 0, 0, 0); n0.fixAll();
+        m.nodes = { n0, Node(1, 2000, 0, 0) };
+        m.members = { Member(0, 0, 1, 0, 0) };
+        NodalLoad p; p.node = 1; p.comp[Uz] = -1000.0; m.nodalLoads = { p };
+        CollapseOptions co; co.dlf = 1.0;
+        const CollapseHistory h = runProgressiveCollapse(m, co);
+        const DemandSummary ds = worstUtilization(m, solve(m));
+        const bool shape = !h.steps.empty() && h.steps[0].solved && ds.valid;
+        const real diff = shape ? std::fabs(h.steps[0].maxDC - ds.maxDC) : 1.0;
+        addRow("Collapse driver", "internal D/C screen mirrors worstUtilization",
+               "baseline-step maxDC == public worstUtilization maxDC (no drift between the two)",
+               "|maxDC difference| (want exact 0)", diff, 0.0, shape && diff == 0.0);
+    }
+}
+
 void testSafetyAndMargin() {
     // C3 safety factor + C4 criticality (pivot) margin. A cantilever (root moment PL) has the
     // closed-form worst utilization D/C = (PL/W)/cap.bend and safety factor 1/(D/C). pivotMargin
@@ -980,6 +1068,7 @@ int main() {
     testElementRemoval();
     testShellRemoval();
     testConnectivity();
+    testCollapseDriver();
     testSafetyAndMargin();
 
     int failures = 0;
