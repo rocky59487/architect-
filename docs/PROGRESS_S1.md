@@ -17,7 +17,7 @@
 - 順手補齊 `vswhere` 目錄上 PATH 的一致性修復(build.bat/build_cli/build_linear_audit 都有,build_perf 漏了 → vcvars 裸 vswhere 警告)。
 - 驗證:`frame_perf.exe` 連結乾淨無警告。獨立 bugfix,與 S1 新增無耦合。
 
-### 3. 稀疏屈曲 overload + F34 oracle — commit `(本次)` ✅
+### 3. 稀疏屈曲 overload + F34 oracle — commit `a91b171` ✅
 - **`BucklingOptions`**(POD:`denseThreshold=500`/`nev=1`/`maxIter=300`/`tol=1e-11`)+ `solveBuckling` 三參 overload;舊兩參版委派 `BucklingOptions{}`。
 - `BucklingAnalysis.cpp` 重構:共用步驟(參考解→軸力→Kg)→ 依 `nf` vs `denseThreshold` 分派 **稀疏**(`subspaceSmallest(Kff, S.ldlt, negKgff, nev)`,復用既有 LDLT,`lambda(0)`=criticalFactor)或 **稠密**(GES,**bit-identical** 保 F23 不變);稀疏失敗→稠密 fallback(永遠正確)。
 - **決策/假設(誠實標)**:
@@ -36,5 +36,22 @@
 - **OpenSees strict**:既有「移除態」逐位移場景改走 ReSolveSession 重跑一次(同容差)。
 - 理由:務實分層 gate 政策(額度受限),重 gate 集中里程碑跑。
 
-## 下一個交付點
-- **ReSolveSession 三層重分析階梯(F35/F36)** — S1 最硬核:Tier-1 Woodbury 低秩 + Tier-2 stale-LDLT PCG + Tier-3 全重分解;F 增量記帳 `[NEW CODE]`(F35 須含 UDL/殼子案例安全網);新 `Reanalysis.{h,cpp}` → build 腳本補源檔。原型 `Research/WS_N_incremental/exp_incremental_refactor.cpp`。
+## 下一個交付點:ReSolveSession(實作就緒筆記 — 已勘完所有引擎接點)
+
+> 建議分兩個完整 commit:**(A) Tier-1 Woodbury + Tier-3 rebaseline + F 增量 + recover + 機構偵測 + F35 oracle**(完整、正確、可獨立交付:rank>maxRank 直接 rebaseline=fresh=永遠正確);**(B) Tier-2 stale-LDLT PCG**(純效能中間層,後續)。如此每個 commit 都非半成品。
+
+**已確認的引擎接點(寫 Reanalysis.cpp 直接用)**:
+- 型別:`MemberId=int`、`gdof(nodeIdx,d)=6*nodeIdx+d`(`FrameTypes.h`,public,`DOF_PER_NODE=6`)。
+- baseline:`assembleAndFactor(base, opts)` → `const auto& S = *ps.impl`;拿 `S.K`(全域 N×N 稀疏)、`S.fmap`(free map,-1=約束)、`S.nf`、`S.ldlt`(**K_ff 的 LDLT**,可直接當 Woodbury 的 K0^-1)、`S.elems`(**只含 active** 元素)。
+- **元素 K 抽取**(每根停用/恢復的 member/shell):建暫態 `BeamColumnElement(memberIdx)`(12 DOF)或 `MITC4ShellElement(shellIdx)`(24 DOF)→ `prepare(model,opts,why)` → `assemble(trips)` 拿全域三元組(與 baseline **逐位元同源**,因同一份元素碼)。從 trips 收集相異全域 DOF → 組 ne×ne 密集 Ke。
+- **降到 free + 低秩**:keep=fmap≥0 的 local idx,rid=其 fmap 值;`SelfAdjointEigenSolver(Ks)` 取 λ>1e-9·λmax 的正模態 → W 欄(nf 空間),s=sign·λ(−1 移除/+1 恢復)。梁 rank≤6、殼≤18。
+- **Woodbury**(直接移植原型 `Ladder`,`exp_incremental_refactor.cpp` L54-140):`Z=ldlt.solve(W)`;`Mc=Wᵀ Z` 增量長(新塊 `B1=Wnᵀ Z`,對稱免重算);solve:`C=Mc+diag(1/s)`→`FullPivLU`→`pivRatio=min/max|diag U|`,`<mechPivotTol(1e-10)`=機構;`u_ff=u0ff − Z·(C⁻¹·(Wᵀ u0ff))`。
+- **F 增量 [NEW CODE](原型未驗,F35 須把關)**:baseline `Fff = reduceVec(nodal + Σ active elems addEquivalentNodalLoads(F))`。停用 member/shell 時:暫態元素 `addEquivalentNodalLoads(Fe=Zero(N))` → reduceVec → **從 Fff 減掉**(該桿 UDL/該殼壓力的等效載隨元素離開);恢復則加回。`u0ff = ldlt.solve(Fff_current)` **每次 solve 重算**(F 變了)。⚠️ 純節點載時 ΔF=0(原型情境);UDL/殼壓力才有 ΔF——這正是風險點。
+- **recover**:`u_ff` scatter 回全域 `u(N)`(free 填 uf、約束填 prescribed)→ 對**目前 active 集**建暫態元素 prepare → `recover(u,R)` 出桿端力/殼內力;先 stamp 所有 id(鏡像 `FrameSolver.cpp` L266-273,inactive 列留 id+0 力)。`R.pivotMargin` 填 baseline 構型值(語意=基準健康度,文檔標)。
+- **Tier-3 rebaseline**:`assembleAndFactor(work)`(work=base 拷貝+當前 active flags)→ 換新 baseline,清空 W/Z/Mc/deltaSet/Fff 重建。永遠正確(=fresh 路徑)。
+- **dispatch**:R=Σrank;R==0→tier0(`ldlt.solve(Fff)`);R≤maxRank→Tier-1;否則 (commit A) →Tier-3 rebaseline / (commit B) →Tier-2 PCG 否則 Tier-3。
+- 需自寫小工具(research_common 不在引擎):`reduceVec(Fglobal,fmap,nf)`、`scatterVec(uff,fmap,N)`(`reduceFF` 已在 BucklingAnalysis.cpp,可複用或內聯)。
+- **build 同步**:新 `Private/Reanalysis.cpp` 要補進 `build.bat` + `build_linear_audit.bat` 源檔清單(顯式,顯式豁免 build_cli/build_perf 並註明)。
+- **API**:`Public/FrameCore/Reanalysis.h`(POD `ReanalysisOptions{maxRank=96,pcgTol=1e-10,pcgMaxIter=500,allowTier2,mechPivotTol=1e-10,SolveOptions solve}`、`ReanalysisStats{tier,rank,pcgIters,relResidual,refactored,mechanism}`、PIMPL `ReSolveSession`,簽名見 `docs/specs/S1_resolve_ladder.md` ②)。零 Eigen 洩漏。
+- **F35 oracle(spec ⑥;新編號 F35,非 spec 暫定)**:塔(3,2,4)序列移除 8 桿(**含一根帶 UDL 的桿**)每步 vs fresh `assembleAndFactor+solveLoad` relMax≤1e-10;**+ 殼壓力子案例**(F 增量殼版,殼 rank≤18 未在原型驗過→不過則殼走 Tier-3);全恢復 vs baseline≤1e-12;機構:2 元素鏈移底→mech=true 且 fresh singular;portal 移梁→兩者皆穩。audit +(tier1 一致/恢復漂移/機構/[Tier-2 容差待 commit B])。
+- ⚠️ 殼 rank-18 風險:先加殼版 F35 子案例;不過 → 殼一律走 Tier-2/3(階梯仍成立),文檔誠實標。
