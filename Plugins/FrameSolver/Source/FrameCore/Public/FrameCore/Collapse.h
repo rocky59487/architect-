@@ -30,16 +30,40 @@ struct CollapseOptions {
     std::vector<MemberId> initialRemovals;
     std::vector<int>      initialShellRemovals;   // same, for shell facet ids (stage 3d)
 
+    // Event-to-event plastic hinges (stage 4b). When true, a HINGE-CAPABLE member (fy > 0 and
+    // Zy/Zz > 0) fails in bending DUCTILELY: its bending no longer triggers removal; instead a
+    // hinge forms when |M| >= Mp = fy*Z on an end/axis (the driver inserts the PlasticHinge AND
+    // its node-side moment, see Hinge.h), and the run goes on until a hinge mechanism (LDLT
+    // singular -> Collapsed) or quiescence. Its BRITTLE modes shrink to the SEPARABLE ratios --
+    // pure axial N/A, shear, torsion (the combined-fibre sM +/- sN allowable screen stays
+    // reporting-only, since its bending content is ductile here); members without fy/Z fall
+    // back to full brittle removal, shells stay brittle (von Mises). Honest boundary:
+    // sequential linear analysis, NOT true elastoplasticity -- no hinge unloading/reversal,
+    // uniaxial Mp, no N-M interaction.
+    bool plasticHinges = false;
+
     SolveOptions solve;   // pivotTol / enableReleases / useTimoshenko passthrough
 };
 
 enum class CollapseOutcome {
-    Stable,     // every screened active element has D/C <= removeThreshold
-    Collapsed,  // the grounded remainder went singular (mechanism) after fragment cleanup,
-                // or no active element remains grounded. The engine does NOT distinguish
-                // local from global mechanism (see diagnostic).
+    Stable,     // no event triggers: every brittle ratio is at/below removeThreshold and (in
+                // hinge mode) every |M|/Mp < 1. NOTE in hinge mode the REPORTED maxDC may sit
+                // above the threshold while Stable: bending of a hinge-capable member is
+                // ductile and waits for Mp (the allowable screen sits BELOW fy by design).
+    Collapsed,  // the grounded remainder went singular (mechanism -- including a hinge
+                // mechanism in hinge mode) after fragment cleanup, or no active element
+                // remains grounded. The engine does NOT distinguish local from global
+                // mechanism (see diagnostic).
     MaxSteps,   // step budget exhausted while events were still occurring
     Invalid     // invalid model / options (see diagnostic)
+};
+
+// A hinge formed by the driver (stage 4b): member, released local dof (4/5/10/11), and the
+// SIGNED residual Mp it carries from formation on (local end-force convention).
+struct CollapseHingeEvent {
+    MemberId member = 0;
+    int      dof    = 0;
+    real     Mp     = 0;
 };
 
 // One driver step. The event lists are what was APPLIED at the START of this step (step 0
@@ -50,9 +74,11 @@ struct CollapseStep {
 
     std::vector<MemberId> removedMembers;   // applied at the start of this step
     std::vector<int>      removedShells;    // shell facets removed (mode == ShellVonMises)
+    std::vector<CollapseHingeEvent> formedHinges;   // hinges formed (mode == Bending, 4b)
     FailMode mode = FailMode::None;         // governing mode that selected this step's event
                                             // (None for the scenario-imposed step 0)
-    real triggerRatio = 0;                  // the D/C that condemned it (0 at step 0)
+    real triggerRatio = 0;                  // the ratio that condemned it: D/C for removals,
+                                            // |M|/Mp for hinges (0 at step 0)
 
     // Fragments cut loose by this step's removal: each is wholly deactivated, its nodes are
     // temporarily pinned at zero (they read u = 0 from this step on) and their nodal loads

@@ -1559,6 +1559,56 @@ int main() {
             mV2.hinges.push_back(PlasticHinge{ 99, 5, 0.0 });
             checkTrue("validate rejects hinge on missing member", !mV2.validate(why), why);
         }
+
+        // ---------- F33: event-to-event hinge driver (stage 4b) — w* = 16 Mp / L^2 ----------
+        {
+            // The classic fixed-fixed plastic-collapse bracket. Hinge order and every ratio is
+            // closed form: support hinges form at |M|/Mp = wL^2/(12 Mp), the surviving span then
+            // carries wL^2/8 - Mp/2 at the far support, and the THIRD (midspan) hinge -- the
+            // mechanism -- forms iff wL^2/8 - Mp >= Mp, i.e. w >= w* = 16 Mp / L^2 exactly.
+            // Driving 0.98 w* must end Stable with exactly two hinges; 1.02 w* must form the
+            // third hinge and go singular -> the analytic collapse load is bracketed to +/-2%.
+            const real wStar = 16.0 * Mp / (Ltot * Ltot);          // 75 N/mm
+            CollapseOptions co; co.dlf = 1.0; co.plasticHinges = true;
+
+            FrameModel mA; buildBeam(mA, 0.98 * wStar);
+            const CollapseHistory hA = runProgressiveCollapse(mA, co);
+            checkTrue("0.98 w*: outcome Stable", hA.outcome == CollapseOutcome::Stable, hA.diagnostic);
+            checkTrue("0.98 w*: exactly 3 steps, 2 hinges",
+                      hA.steps.size() == 3 &&
+                      hA.steps[1].formedHinges.size() == 1 && hA.steps[2].formedHinges.size() == 1 &&
+                      hA.steps[1].removedMembers.empty() && hA.steps[2].removedMembers.empty(), "");
+            if (hA.steps.size() == 3) {
+                const CollapseHingeEvent& h1 = hA.steps[1].formedHinges[0];
+                const CollapseHingeEvent& h2 = hA.steps[2].formedHinges[0];
+                checkTrue("hinge 1 at member 0 end i (tie-break smallest id/dof)",
+                          h1.member == 0 && h1.dof == 5 && hA.steps[1].mode == FailMode::Bending, "");
+                checkClose("hinge 1 ratio = 0.98*16/12", hA.steps[1].triggerRatio, 0.98 * 16.0 / 12.0, 1e-9);
+                checkClose("|hinge 1 Mp| = fy*Zz", std::fabs(h1.Mp), Mp, 1e-12);
+                checkTrue("hinge 2 at member 1 end j", h2.member == 1 && h2.dof == 11, "");
+                checkClose("hinge 2 ratio = 0.98*2 - 0.5", hA.steps[2].triggerRatio, 0.98 * 2.0 - 0.5, 1e-9);
+                // Stable is declared while the REPORTED allowable D/C still exceeds 1: the
+                // bending of a hinge-capable member is ductile and waits at M < Mp. The final
+                // midspan moment is (0.98*2 - 1) Mp = 0.96 Mp -> screen D/C = 0.96*Mp/(W*cap).
+                checkClose("final maxDC = 0.96*Mp/(W cap) (ductile > 1, still Stable)",
+                           hA.steps[2].maxDC, 0.96 * Mp / (sec.Wz() * hmat.cap.bend), 1e-9);
+            }
+
+            FrameModel mB; buildBeam(mB, 1.02 * wStar);
+            const CollapseHistory hB = runProgressiveCollapse(mB, co);
+            checkTrue("1.02 w*: outcome Collapsed (hinge mechanism)",
+                      hB.outcome == CollapseOutcome::Collapsed, hB.diagnostic);
+            checkTrue("1.02 w*: exactly 4 steps, 3 hinges, terminal unsolved",
+                      hB.steps.size() == 4 && hB.steps[3].formedHinges.size() == 1 &&
+                      !hB.steps[3].solved, "");
+            if (hB.steps.size() == 4) {
+                checkClose("hinge 3 ratio = 1.02*2 - 1", hB.steps[3].triggerRatio, 1.02 * 2.0 - 1.0, 1e-9);
+                checkTrue("hinge 3 completes the mechanism at midspan",
+                          hB.steps[3].formedHinges[0].member == 0 && hB.steps[3].formedHinges[0].dof == 11, "");
+            }
+            std::printf("   plastic collapse load bracketed: Stable at 0.98 w*, Collapsed at 1.02 w*  (w*=16Mp/L^2=%.4g)\n",
+                        wStar);
+        }
     }
 
     std::printf("\n%s  (failures=%d)\n", g_fail == 0 ? "ALL PASS" : "FAILURES", g_fail);

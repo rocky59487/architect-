@@ -1136,6 +1136,61 @@ void testPlasticHingeMechanics() {
     }
 }
 
+void testHingeDriverCompat() {
+    // 4b driver-mode invariants:
+    // (a) plasticHinges=false must behave EXACTLY as before 4b existed (bit-identical history
+    //     on a hinge-capable model), and at a load where no event triggers in either mode the
+    //     two modes must agree bit-for-bit;
+    // (b) ductility is BENDING-only: a hinge-capable member failing in pure TENSION must still
+    //     be removed brittly, so the hinge-mode history equals the brittle-mode history on the
+    //     F30 hanging-chain fixture even with fy set.
+    Material mat(210000.0, 80769.0, 7850.0);
+    mat.fy = 300.0;
+    mat.cap = Capacity::make(300.0, 300.0, 180.0);
+    Section sec = Section::Rectangular(100.0, 100.0);
+
+    {   // (a) sub-threshold fixed-fixed beam: both modes Stable with identical bits
+        FrameModel m; m.materials = { mat }; m.sections = { sec };
+        Node n0(0, 0, 0, 0); n0.fixAll();
+        Node n2(2, 4000, 0, 0); n2.fixAll();
+        m.nodes = { n0, Node(1, 2000, 0, 0), n2 };
+        m.members = { Member(0, 0, 1, 0, 0), Member(1, 1, 2, 0, 0) };
+        MemberUDL u0; u0.member = 0; u0.w_local = { 0.0, -30.0, 0.0 };   // D/C = 0.8 < 1
+        MemberUDL u1; u1.member = 1; u1.w_local = { 0.0, -30.0, 0.0 };
+        m.memberUDLs = { u0, u1 };
+        CollapseOptions cb; cb.dlf = 1.0;
+        CollapseOptions ch = cb; ch.plasticHinges = true;
+        const CollapseHistory hb = runProgressiveCollapse(m, cb);
+        const CollapseHistory hh = runProgressiveCollapse(m, ch);
+        const bool shape = hb.outcome == CollapseOutcome::Stable && hh.outcome == CollapseOutcome::Stable &&
+                           hb.steps.size() == 1 && hh.steps.size() == 1;
+        const real d = shape ? std::fabs(hb.steps[0].maxDC - hh.steps[0].maxDC) : 1.0;
+        addRow("Hinge driver", "hinge mode is a strict superset below every threshold",
+               "sub-threshold beam: brittle vs hinge mode -> identical Stable step (bit-exact D/C)",
+               "|maxDC difference| (want exact 0)", d, 0.0, shape && d == 0.0);
+    }
+    {   // (b) pure tension stays brittle in hinge mode (ductility is bending-only)
+        Section secThin = Section::Rectangular(20.0, 20.0);
+        FrameModel m; m.materials = { mat }; m.sections = { sec, secThin };
+        Node n0(0, 0, 0, 0); n0.fixAll();
+        m.nodes = { n0, Node(1, 0, 0, -1000), Node(2, 0, 0, -2000), Node(3, 0, 0, -3000) };
+        m.members = { Member(0, 0, 1, 0, 0), Member(1, 1, 2, 0, 1), Member(2, 2, 3, 0, 0) };
+        NodalLoad p; p.node = 3; p.comp[Uz] = -150000.0; m.nodalLoads = { p };
+        CollapseOptions cb; cb.dlf = 1.0;
+        CollapseOptions ch = cb; ch.plasticHinges = true;
+        const CollapseHistory hb = runProgressiveCollapse(m, cb);
+        const CollapseHistory hh = runProgressiveCollapse(m, ch);
+        bool ok = hb.outcome == hh.outcome && hb.steps.size() == hh.steps.size();
+        if (ok)
+            for (size_t s = 0; s < hb.steps.size(); ++s)
+                ok = ok && hb.steps[s].removedMembers == hh.steps[s].removedMembers &&
+                     hb.steps[s].mode == hh.steps[s].mode && hh.steps[s].formedHinges.empty();
+        addRow("Hinge driver", "pure tension stays brittle under hinge mode",
+               "hanging chain with fy set: hinge-mode history == brittle history, zero hinges",
+               "histories identical (want 1)", ok ? 1.0 : 0.0, 0.0, ok);
+    }
+}
+
 void testSafetyAndMargin() {
     // C3 safety factor + C4 criticality (pivot) margin. A cantilever (root moment PL) has the
     // closed-form worst utilization D/C = (PL/W)/cap.bend and safety factor 1/(D/C). pivotMargin
@@ -1213,6 +1268,7 @@ int main() {
     testCollapseDriver();
     testShellFailureScreen();
     testPlasticHingeMechanics();
+    testHingeDriverCompat();
     testSafetyAndMargin();
 
     int failures = 0;
