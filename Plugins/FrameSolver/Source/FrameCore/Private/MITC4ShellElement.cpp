@@ -624,6 +624,11 @@ void MITC4ShellElement::recover(const VecX& u, SolveResult& R) const {
     // Per-corner bending moments (natural coords of the 4 CCW corners) for design peak
     // recovery. Linear field -> these combine/envelope correctly; a constant-moment field
     // gives every corner == the centre value above.
+    // DKQ CAVEAT: the discrete-Kirchhoff B has large serendipity derivatives at the corners, so
+    // BdkqMine at a corner is NOT a pointwise curvature estimator (a constant-curvature field does
+    // NOT give corner == centre for DKQ). The per-corner values stay LINEAR in dp (combine/envelope
+    // remain valid), but for a DKQ design PEAK use the centre value (Gauss-point extrapolation is
+    // NOT IMPLEMENTED) -- do not read DKQ MxxC[k] as the moment AT that corner.
     const real cxi[4]  = { -1.0, 1.0, 1.0, -1.0 };
     const real ceta[4] = { -1.0, -1.0, 1.0, 1.0 };
     for (int k = 0; k < 4; ++k) {

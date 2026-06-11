@@ -112,7 +112,12 @@ K_membrane_QM6 = K_c − K_ca K_aa⁻¹ K_caᵀ                (12×12,凝聚回
 積分:2×2 Gauss(同現有);`Bm` 隨積分點(協調項不變),`B_inc` 用 J₀(常數)。drilling 項 γ=G·t **原樣保留**
 (與 bubble 無耦合,K_ca 的 thz 列為 0)。prepare 末把 `K_membrane_QM6` 經 `membraneToShellMap` 注入 kl_。
 
-**recover 一致性**(避免內力↔剛度不一致;P5 明列):prepare 存 `Hcond = K_aa⁻¹ K_caᵀ`(4×12)與
+**recover 一致性**(避免內力↔剛度不一致;P5 明列):
+> **⚠️ 實作簡化(審核確認)**:`B_inc(0,0)=0`(∂P₁/∂ξ=−2ξ、∂P₂/∂η=−2η 在中心消失),而
+> `ShellElementForces.N` 是**中心值**,故中心膜 recover 無需 bubble 貢獻——**實作不存 Hcond/Binc0
+> 快取,直接用 `Bm(0,0)·dm`**(自動受益於 QM6 改善的位移解)。以下 Hcond/Binc0 路徑僅為未來
+> **per-corner 膜輸出**才需(corner B_inc≠0);本階段不實作。
+原始通用路徑(未來 per-corner 用):prepare 存 `Hcond = K_aa⁻¹ K_caᵀ`(4×12)與
 中心 `B_inc0 = B_inc(0,0)`(3×4)。recover:
 ```
 dm = membraneToShellMap · ul                 (12×1 局部膜位移 [u,v,thz]×4)
@@ -169,9 +174,11 @@ kl_ = Pbᵀ Kp Pb + Pmᵀ Km Pm                                                 
 ## ⑥ Oracle(誠實分級)
 
 ### 8a QM6 — `[VERIFIED]`(QM6 是文獻方法之 FrameCore 實作)
-- **F48a 膜畸變 patch test(機器精度)**:不規則四邊形(P5 同款畸變網格),施加常應變位移場
-  (u=αx+βy, v=...)→ QM6 膜回復**精確常應力**、bubble DOF a≈0、∫B_inc=0。**目標 rel ≤ 1e-12**
-  (P5 numpy 達 QM6=0)。**這是 QM6 中心 Jacobian 修正的硬獨立 oracle**(畸變網格才能分辨 Q6 vs QM6)。
+- **F48a 膜常應變 patch test(機器精度)**:regular + parallelogram(affine,detJ 常數)網格,施加
+  常應變位移場 → QM6 膜回復**精確常應力**、∫B_inc=0(中心 Jacobian)。**目標 rel ≤ 1e-12**(實測 2.2e-16)。
+  **⚠️ 審核確認:∫B_inc=0 僅在 affine(平行四邊形)嚴格成立;一般非 affine 四邊形 ∫B_inc=O(h),QM6 過
+  弱(Irons-Razzaque)patch、隨網格收斂(見 §⑨),非逐位元。** 仍是 QM6 中心 Jacobian 的硬獨立 oracle
+  (Q6 不過此 affine patch,QM6 過)。
 - **F48b Cook's membrane 收斂對照**:標準 Cook's skew membrane(梯形懸臂、tip 剪力),tip 撓度對參考
   解 ~23.96。**驗 QM6 比 Q4 顯著更接近**且符合 P5 數據量級(@N16:Q4 ≈ −3.2% / **QM6 ≈ −0.9%**;
   斷言 `|err_QM6| < |err_Q4|` 且 QM6 @N16 在 [−2%, 0] 內)。在 facet 平面內建模(膜主導)。
@@ -233,8 +240,10 @@ F48(a/b/c)、F49(a/b/c);UE `FrameCore.Shell.IncompatibleMembrane` + `FrameCore.S
   patch test(modified integration,Taylor 1976),高度扭曲網格仍有殘差(WS_E F-E2);bubble 對矩形精確、
   扭曲漸降。
 - **DKQ 邊界**:**完全無厚板能力**(無橫向剪;t/L > ~1/20 Kirchhoff 假設失效 → 必回 MITC4);`Qx=Qy=0` 是
-  **刻意**(非遺漏);初版 2×2 Gauss(Batoz 原文部分用 3 點,薄板 patch 通過即採,否則改 Batoz 積分,誠實標);
-  DKQ 是**薄板快路 / Kirchhoff oracle**,**非**主殼元素(WS_E「避什麼」第一條)。
+  **刻意**(非遺漏);初版 2×2 Gauss(Batoz 原文部分用 3 點,薄板 patch 通過即採);DKQ 是**薄板快路 /
+  Kirchhoff oracle**,**非**主殼元素(WS_E「避什麼」第一條)。**⚠️ 審核確認:DKQ per-corner 彎矩
+  `MxxC[k]` 因角點 serendipity 導數大,**非該角點逐點曲率的好估計**(常曲率場角點≠中心);per-corner 仍
+  線性於 dp(combine/envelope 有效),但 DKQ 設計峰值用中心值(Gauss 外插 [NOT IMPLEMENTED])。**
 - **預設安全**:兩旗標 false 保 OpenSees `ShellMITC4` ~1e-10 平板閘門(此 opt-in 策略與 E2 sparse modal /
   D3 角點彎矩同模式)。**改進膜/板不得對 `ShellMITC4` 要求 ~1e-10**(會誤判退步)→ QM6/DKQ 的第三方對標
   各走 `ShellDKGQ`(DKQ)或文獻收斂表(QM6 無直接 OpenSees 對應膜)。

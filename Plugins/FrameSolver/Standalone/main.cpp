@@ -2362,14 +2362,16 @@ int main() {
 
     // ---------- F48: QM6 incompatible-mode membrane (S8-8a) ----------
     {
-        std::printf("[F48] QM6 incompatible-mode membrane: distorted patch + in-plane bending unlock\n");
+        std::printf("[F48] QM6 incompatible-mode membrane: constant-strain patch + in-plane bending unlock\n");
         const real Es = 30000.0, nu = 0.3, Gs = Es / (2.0 * (1.0 + nu));
         Material smat(Es, Gs); smat.nu = nu;
         SolveOptions qm6; qm6.useIncompatibleMembrane = true;
 
-        // (a) QM6 must STILL pass the distorted constant-strain membrane patch: the centre-
-        // Jacobian correction makes integral(B_inc)=0, so a constant stress stores no bubble
-        // energy. Reuse the F14a patch (regular + parallelogram) with QM6 turned ON.
+        // (a) QM6 must STILL pass the constant-strain membrane patch. On regular AND parallelogram
+        // meshes (affine map, detJ = const) the centre-Jacobian correction makes integral(B_inc)=0
+        // EXACTLY, so a constant stress stores no bubble energy. (On a general NON-affine quad
+        // integral(B_inc) is only O(h); QM6 then passes the WEAK Irons-Razzaque patch test and
+        // converges under refinement -- see S8_shell.md.) Reuse the F14a patch with QM6 turned ON.
         for (const real skew : { 0.0, 0.4 }) {
             const real a = 1000.0, t = 10.0, gx = 1e-4;
             const real f = Es / (1.0 - nu * nu);
@@ -2409,7 +2411,7 @@ int main() {
             const real eQ4  = (dQ4 - dEB) / dEB, eQM6 = (dQM6 - dEB) / dEB;
             std::printf("   slender 4x1 cantilever dEB=%.5g  Q4=%.5g (%.1f%%)  QM6=%.5g (%.1f%%)\n",
                         dEB, dQ4, 100 * eQ4, dQM6, 100 * eQM6);
-            checkTrue("Q4 membrane LOCKS (tip < 60% of Euler-Bernoulli)", dQ4 < 0.60 * dEB,
+            checkTrue("Q4 membrane LOCKS (tip < 40% of Euler-Bernoulli)", dQ4 < 0.40 * dEB,
                       "dQ4/dEB=" + std::to_string(dQ4 / dEB));
             checkTrue("QM6 RELEASES the lock (tip within 15% of Euler-Bernoulli)",
                       std::fabs(eQM6) < 0.15, "eQM6=" + std::to_string(eQM6));
@@ -2439,10 +2441,14 @@ int main() {
             std::printf("   Cook's refC(QM6 N=32)=%.4g  Q4 N=32=%.4g (lit~23.96)  N=4: Q4=%.4g (%.1f%%)  QM6=%.4g (%.1f%%)\n",
                         refC, q4f, q4c, 100 * eq4, qmc, 100 * eqm);
             // Compatibility: Q4 is also conforming and shares QM6's fine-mesh limit, just reaches
-            // it much slower. At N=32 QM6 is already converged (25.02) while Q4 is still climbing
-            // (24.80) toward the same value -- direct evidence QM6 converges faster and rules out
+            // it much slower. At N=32 QM6 is already converged (~25.0) while Q4 is still climbing
+            // (~24.8) toward the same value -- direct evidence QM6 converges faster and rules out
             // QM6 introducing spurious softening. The ~4% gap of the limit to the literature 23.96
-            // is the Hughes-Brezzi drilling penalty + corner-tip sampling convention, NOT a defect.
+            // is the consistent half-weight edge-load lumping + corner-tip sampling used here (NOT
+            // the drilling penalty -- a penalty would STIFFEN and LOWER the tip, the wrong way); it
+            // does not affect the QM6-vs-Q4 RELATIVE convergence conclusion.
+            checkTrue("Cook converged tip in plausible range [23,27] (guards self-reference drift)",
+                      refC > 23.0 && refC < 27.0, "refC=" + std::to_string(refC));
             checkTrue("Cook Q4 monotonically approaches the QM6-converged tip (same limit, Q4 slower)",
                       q4f > q4c && std::fabs(q4f - refC) < 0.02 * refC,
                       "q4_N4=" + std::to_string(q4c) + " q4_N32=" + std::to_string(q4f) + " refC=" + std::to_string(refC));

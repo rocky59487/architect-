@@ -22,7 +22,8 @@ modelFingerprint / 不新增 `.cpp`**(全寫進 `MITC4ShellElement.cpp`,四 buil
 ## 8a QM6 不協調膜
 
 **數學**:位移增廣 u=ΣNᵢuᵢ+P₁a₁+P₂a₂, v=ΣNᵢvᵢ+P₁a₃+P₂a₄。`B_inc`(3×4)用**元素中心常數
-Jacobian J₀**(Taylor 1976 修正)→ ∫B_inc=0 → 常應力狀態 bubble 零能 → **畸變網格 patch test 通過**。
+Jacobian J₀**(Taylor 1976 修正)→ **affine(平行四邊形)網格 ∫B_inc=0** → 常應力 bubble 零能 → patch
+通過(⚠️ 審核確認:一般非 affine 四邊形 ∫B_inc=O(h),QM6 過**弱 Irons-Razzaque** patch、隨網格收斂)。
 增廣勁度 static condensation `K* = Kc − Kca Kaa⁻¹ Kcaᵀ`(Kc 重用 `membraneK` 避免公式漂移)。
 
 **⚠️ 關鍵發現(drilling 耦合)**:初版只把 bubble 耦合到**膜應變**,QM6 細長懸臂只解鎖到 −38%
@@ -34,8 +35,9 @@ Jacobian J₀**(Taylor 1976 修正)→ ∫B_inc=0 → 常應力狀態 bubble 零
 
 **oracle F48**:(a) 畸變膜 patch 機器精度(eNxx=0);(b) 細長 4×1 in-plane 懸臂 Q4 −75.5%(鎖死)
 → QM6 −0.9% vs Euler-Bernoulli;(c) Cook's skew membrane 自洽收斂(QM6 N=4 −4.2% 收斂快於 Q4
-−27.5%,+ Q4 單調趨近 QM6 收斂值的相容性論證,refC≈25.0 vs 文獻 23.96 差 ~4% 為 drilling penalty +
-角點取樣慣例,非缺陷)。
+−27.5%,+ Q4 單調趨近 QM6 收斂值的相容性論證 + refC∈[23,27] 合理性 floor;refC≈25.0 vs 文獻 23.96
+差 ~4% 為 **half-weight edge-load lumping 慣例**(⚠️ 審核更正:**非 drilling penalty——penalty 應偏硬使
+撓度更小、方向相反**),不影響 QM6 vs Q4 相對收斂結論)。
 
 **recover**:中心膜 recover **無需改**——`B_inc(0,0)=0`(∂P₁/∂ξ=−2ξ|₀=0、∂P₂/∂η=−2η|₀=0),
 且 `ShellElementForces.N` 是中心值,故膜應變 = `Bm(0,0)·dm` 自動受益於 QM6 改善的位移解,bubble
@@ -58,8 +60,9 @@ Gauss,無 shear)。
 0.00126qa⁴/D(N16 1.52%)。**OpenSees ShellDKGQ 對照 = 1.69e-12**(flat 薄板純彎曲,膜不參與,只比
 共用 Batoz DKQ 板;機器精度級 = 第三方獨立元素鐵證)。
 
-**recover**:DKQ 分支板矩用 `BdkqMine`,**Qx=Qy=0**(Kirchhoff 無橫向剪,刻意非遺漏);per-corner
-同 MITC4 機制。
+**recover**:DKQ 分支板矩用 `BdkqMine`,**Qx=Qy=0**(Kirchhoff 無橫向剪,刻意非遺漏);per-corner 同
+MITC4 機制但 **⚠️ 審核確認:DKQ per-corner 因角點 serendipity 導數大,非逐點曲率好估計(常曲率場角點≠
+中心),DKQ 設計峰值用中心值**(per-corner 仍線性於 dp,combine/envelope 有效)。
 
 ## 檔案改動
 
@@ -101,8 +104,32 @@ Gauss,無 shear)。
 7. **Cook's membrane 絕對值依賴設定**(載重分配/量測點/drilling),用自洽收斂(細網格自參考)+ 相容性
    論證,勿硬綁文獻 23.96。
 
+## 對抗式審核(2026-06-12,4 agent 平行)
+
+S8 push(`38c7166`)後做 4-agent 平行對抗審核(QM6 數學 / DKQ 數學 / oracle+誠實 / opt-in 安全+整合+純度),
+各錨定真實證據(讀碼行號 + 跑既有 exe + numpy 獨立重算)。**零 CRITICAL、零真實程式 bug**:核心 QM6/DKQ
+數學經多源獨立確認(numpy 重算 B_inc/Kaa/凝聚 + bubble-drilling 能量推導、Batoz serendipity/邊係數/Hx-Hy/
+DOF remap 逐項對照、OpenSees ShellDKGQ 1.69e-12 確認膜真不參與)。findings 全為**誠實性/文檔/測試強化**,已全修:
+
+- **[MAJOR→修] F48a「∫B_inc=0」措辭過廣**:`membranePatch` 的 skew 是 affine(平行四邊形,detJ 常數),
+  ∫B_inc=0 只在 affine 嚴格;一般四邊形 ∫B_inc=O(h) 過**弱 Irons-Razzaque** patch(隨網格收斂)。已修
+  F48a 註解 + spec §⑥⑨ + `SolveOptions.h`。
+- **[MAJOR→修] F48c Cook's 歸因錯誤**:refC≈25.0 vs 文獻 23.96 差 4% 原歸因「drilling penalty」方向不符
+  (penalty 偏硬→撓度更小),實為 **half-weight edge-load lumping 慣例**。已修註解 + 加 `refC∈[23,27]` floor check。
+- **[MAJOR→修] SolveOptions 重用語意文檔缺口**:旗標 baked 進 `PreparedSystem`、不入 fingerprint,不同
+  opts 須各自 `assembleAndFactor`(API 本身設計安全,僅缺文字警告)。已加 `SolveOptions.h` REUSE SEMANTICS 註解。
+- **[MINOR→修] DKQ per-corner 非逐點曲率估計**(角點 serendipity 導數大,常曲率場角點≠中心)→ `recover`
+  註解 + spec/PROGRESS 標「設計峰值用中心值,combine/envelope 仍線性有效」。
+- **[MINOR→修] F48b Q4 鎖死下界 60%→40%**(實測 24.5%,增強退步偵測)。
+- **novelty 精確化**:bubble-drilling 耦合(`[NEW CODE]`)是 Hughes-Brezzi drilling × QM6 bubble 的自然延伸
+  (Ibrahimbegovic & Frey 1993 殼脈絡有類似),非純原創算法;DKQ DOF remap `bx=θy/by=−θx` 有物理推導(非僅 patch 湊)。
+- **[誠實聲明] QM6/DKQ + ReSolve(Woodbury)交互**:旗標經 `opts.solve` 透傳正確,Woodbury 在 K 空間與 `kl_`
+  選哪條路正交,數學無 latent bug;但**無專用 oracle 涵蓋此交互**(已知未測項,非目前優先)。
+
+審核後重跑五腿 gate 全綠,commit 審核修正(誠實性/文檔/測試強化,引擎力學零變更)。
+
 ## 下一步
 
 S9 Co-rotational(WS_F,Battini 2002 / NR + load stepping;elastica shooting 表已備)→ S10 N-M 互動
 塑鉸(必在 S9 後,R4 方向耦合)→ S11 MITC9i(殿後)。提示詞 `docs/AGENT_PROMPT_S5_S11.md`。
-DKQ 後續:per-corner 膜 QM6 輸出、變厚度、DKQ 殼幾何勁度(薄板挫屈)。
+DKQ 後續:per-corner 膜 QM6 輸出 + Gauss 外插、變厚度、DKQ 殼幾何勁度(薄板挫屈)。
