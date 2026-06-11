@@ -54,6 +54,7 @@ uint64_t modelFingerprint(const FrameModel& m) {
         uint64_t rb = 0; for (int d = 0; d < 12; ++d) if (mem.release[d]) rb |= (1ull << d);
         h = fpMix(h, rb);
         h = fpMix(h, mem.active ? 1ull : 0ull);   // toggling active is a structural (remove/restore) change
+        h = fpMix(h, mem.tensionOnly ? 1ull : 0ull);   // flipping tension-only changes runTensionOnly semantics
     }
     for (const auto& sh : m.shells) {
         h = fpMix(h, static_cast<uint64_t>(static_cast<int64_t>(sh.id)));

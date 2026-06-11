@@ -1,5 +1,6 @@
 #include "FrameCore/BucklingAnalysis.h"
 #include "FrameCore/PDeltaAnalysis.h"
+#include "FrameCore/TensionOnly.h"
 #include "FrameCore/Reanalysis.h"
 #include "FrameCore/Combination.h"
 #include "FrameCore/FrameSolver.h"
@@ -1558,6 +1559,43 @@ void testPDelta() {
     }
 }
 
+void testTensionOnly() {
+    Material tmat(200000.0, 76923.07692307692, 7850.0); tmat.cap = Capacity::make(1e9, 1e9, 1e9);
+    Section stocky = Section::Rectangular(250.0, 250.0);
+    Section tbrace = Section::Rectangular(60.0, 60.0);
+
+    // ---- Check 1: converged tension-only state == model with the compressed brace OMITTED ----
+    {
+        FrameModel m; fixtures::xBracedPortal(m, 5.0e4, 0.0, tmat, stocky, tbrace);
+        const TensionOnlyResult R = runTensionOnly(m);
+        const MemberId slackId = R.slack.empty() ? -1 : R.slack[0];
+        FrameModel ref; fixtures::xBracedPortal(ref, 5.0e4, 0.0, tmat, stocky, tbrace);
+        for (size_t e = 0; e < ref.members.size(); ++e)
+            if (ref.members[e].id == slackId) { ref.members.erase(ref.members.begin() + (long)e); break; }
+        const SolveResult rr = solve(ref);
+        real maxDiff = 0, maxU = 0;
+        for (size_t g = 0; g < R.finalState.u.size() && g < rr.u.size(); ++g) {
+            maxDiff = std::max(maxDiff, std::fabs(R.finalState.u[g] - rr.u[g]));
+            maxU    = std::max(maxU, std::fabs(rr.u[g]));
+        }
+        const real rel = maxDiff / std::max<real>(1e-30, maxU);
+        addRow("Tension-only", "ReSolve eliminator converged state == omitted-member model",
+               "compressed tension-only brace dropped -> displacements equal omitting it (ReSolve round-off)",
+               "rel max |u_TO - u_omitted|", rel, 1e-10, R.converged && R.slack.size() == 1 && rel < 1e-10);
+    }
+
+    // ---- Check 2: tensionOnly is in the solveLoad reuse fingerprint (a flip rejects a stale factor) ----
+    {
+        FrameModel m; fixtures::xBracedPortal(m, 5.0e4, 0.0, tmat, stocky, tbrace);
+        PreparedSystem ps = assembleAndFactor(m);
+        m.members[3].tensionOnly = !m.members[3].tensionOnly;
+        const SolveResult stale = solveLoad(ps, m);
+        addRow("Tension-only", "tensionOnly flag in solveLoad fingerprint",
+               "flipping Member::tensionOnly rejects a reused factorization (no silent stale solve)",
+               "stale solve flagged singular (1=yes)", stale.singular ? 1.0 : 0.0, 0.5, stale.singular);
+    }
+}
+
 }  // namespace
 
 int main() {
@@ -1588,6 +1626,7 @@ int main() {
     testReanalysis();
     testDynamicCollapse();
     testPDelta();
+    testTensionOnly();
 
     int failures = 0;
     std::cout << "Linear-analysis deep audit (post F17-F25 strengthening)\n\n";

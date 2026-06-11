@@ -41,6 +41,14 @@ struct Member {
     // is part of the solveLoad reuse fingerprint (a flipped flag rejects a stale factor).
     bool active = true;
 
+    // When true, this member is TENSION-ONLY (a cable / slender X-brace that buckles out under
+    // compression): the runTensionOnly driver deactivates it on any iteration where it reads
+    // compression and re-activates it when its ends pull apart. It is part of the solveLoad reuse
+    // fingerprint (flipping it changes the driver semantics, so a stale factor is rejected; cost
+    // is zero). Plain assembleAndFactor / solveLoad IGNORE this flag — it only steers
+    // runTensionOnly; a tension-only member solved directly behaves like any ordinary member.
+    bool tensionOnly = false;
+
     Member() = default;
     Member(MemberId id_, NodeId i_, NodeId j_, int matIdx_, int secIdx_)
         : id(id_), i(i_), j(j_), matIdx(matIdx_), secIdx(secIdx_) {}

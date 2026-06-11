@@ -15,6 +15,7 @@
 #include "FrameCore/Collapse.h"
 #include "FrameCore/DynamicCollapse.h"
 #include "FrameCore/PDeltaAnalysis.h"
+#include "FrameCore/TensionOnly.h"
 #include "FrameCore/MemberGeometry.h"
 #include "FrameTestFixtures.h"
 
@@ -2030,6 +2031,79 @@ int main() {
             checkTrue("F40 f=1.05 reference diverged (K_T not PD)", rr.diverged, "");
             checkTrue("F40 f=1.05 frozen diverged (sliding window)", rf.diverged, "iters=" + std::to_string(rf.iterations));
         }
+    }
+
+    // ---------- F42: tension-only X-braced portal — eliminate the compressed brace ----------
+    {
+        std::printf("[F42] Tension-only: X-braced portal, eliminate the compressed brace\n");
+        Material tmat(200000.0, 76923.07692307692, 7850.0); tmat.cap = Capacity::make(1e9, 1e9, 1e9);
+        Section stocky = Section::Rectangular(250.0, 250.0);
+        Section tbrace = Section::Rectangular(60.0, 60.0);
+        FrameModel m; fixtures::xBracedPortal(m, 5.0e4, 0.0, tmat, stocky, tbrace);
+        const TensionOnlyResult R = runTensionOnly(m);
+        checkTrue("F42 converged", R.converged, R.finalState.diagnostic);
+        checkTrue("F42 converged in <=3 iters", R.iterations <= 3, "iters=" + std::to_string(R.iterations));
+        checkTrue("F42 exactly one brace slack", R.slack.size() == 1, "slack=" + std::to_string(R.slack.size()));
+
+        const MemberId slackId = R.slack.empty() ? -1 : R.slack[0];
+        const MemberId tenId   = (slackId == 3) ? 4 : 3;               // the surviving diagonal
+        const real Nten = R.finalState.memberForces[(size_t)tenId].endI.N;
+        checkTrue("F42 surviving brace in tension (N<0)", Nten < 0.0, "N=" + std::to_string(Nten));
+
+        // oracle: the model with the slack (compressed) brace OMITTED from the member list entirely
+        FrameModel ref; fixtures::xBracedPortal(ref, 5.0e4, 0.0, tmat, stocky, tbrace);
+        for (size_t e = 0; e < ref.members.size(); ++e)
+            if (ref.members[e].id == slackId) { ref.members.erase(ref.members.begin() + (long)e); break; }
+        const SolveResult rr = solve(ref);
+        real maxDiff = 0, maxU = 0;
+        for (size_t g = 0; g < R.finalState.u.size() && g < rr.u.size(); ++g) {
+            maxDiff = std::max(maxDiff, std::fabs(R.finalState.u[g] - rr.u[g]));
+            maxU    = std::max(maxU, std::fabs(rr.u[g]));
+        }
+        const real rel = maxDiff / std::max(maxU, real(1e-30));
+        // ReSolve (Woodbury) inner loop matches the omitted-brace FRESH solve to factorization round-off
+        checkTrue("F42 converged == omitted-brace model (rel<1e-10)", rel < 1e-10, "rel=" + std::to_string(rel));
+
+        // fingerprint: flipping tensionOnly rejects a stale factor (it changes driver semantics)
+        FrameModel m2; fixtures::xBracedPortal(m2, 5.0e4, 0.0, tmat, stocky, tbrace);
+        PreparedSystem ps2 = assembleAndFactor(m2);
+        m2.members[3].tensionOnly = !m2.members[3].tensionOnly;
+        const SolveResult stale = solveLoad(ps2, m2);
+        checkTrue("F42 tensionOnly in fingerprint (stale rejected)", stale.singular, "");
+    }
+
+    // ---------- F43: tension-only monotone finite termination + cycle-guard contract ----------
+    {
+        std::printf("[F43] Tension-only: monotone finite termination + cycle guard\n");
+        Material tmat(200000.0, 76923.07692307692, 7850.0); tmat.cap = Capacity::make(1e9, 1e9, 1e9);
+        Section stocky = Section::Rectangular(250.0, 250.0);
+        Section tbrace = Section::Rectangular(60.0, 60.0);
+
+        // vertical squash: both diagonals compress -> both go slack; the moment frame carries it
+        FrameModel m; fixtures::xBracedPortal(m, 1.0e2, 2.0e5, tmat, stocky, tbrace);
+        TensionOnlyOptions mono; mono.allowReactivation = false;
+        const TensionOnlyResult Rm = runTensionOnly(m, mono);
+        checkTrue("F43 monotone converged (finite termination)", Rm.converged, Rm.finalState.diagnostic);
+        checkTrue("F43 monotone bounded iters (<= nTO+1)", Rm.iterations <= 3, "iters=" + std::to_string(Rm.iterations));
+
+        // monotone result respects the tension-only constraint: every ACTIVE brace is not in compression
+        bool okSign = true;
+        for (int e : { 3, 4 }) {
+            const bool slack = std::find(Rm.slack.begin(), Rm.slack.end(), (MemberId)e) != Rm.slack.end();
+            if (!slack) { const real N = Rm.finalState.memberForces[(size_t)e].endI.N; if (N > 1e-6) okSign = false; }
+        }
+        checkTrue("F43 monotone respects tension-only sign constraint", okSign, "");
+
+        // default (reactivation) policy must always TERMINATE across a load sweep — converged, or
+        // cycled-then-monotone, never a hang. The WS-D sweep found no physical flip-flop, so the
+        // cycle path is covered by the guard's finite-termination contract, not a physical case.
+        bool allTerminate = true;
+        for (real Hl : { 1.0e2, 1.0e3, 5.0e3, 3.0e4 }) {
+            FrameModel ms; fixtures::xBracedPortal(ms, Hl, 2.0e5, tmat, stocky, tbrace);
+            const TensionOnlyResult Rs = runTensionOnly(ms);
+            if (!(Rs.converged || Rs.cycled)) allTerminate = false;
+        }
+        checkTrue("F43 default policy terminates across a load sweep", allTerminate, "");
     }
 
     std::printf("\n%s  (failures=%d)\n", g_fail == 0 ? "ALL PASS" : "FAILURES", g_fail);

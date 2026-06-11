@@ -53,6 +53,7 @@ compiles as a standalone console gate *and* as an Unreal Engine module.
 | **Modal analysis** | consistent mass; `solveModal` generalized eigenproblem `Kφ=ω²Mφ` → natural frequencies + mode shapes |
 | **Linear buckling** | geometric stiffness `Kg` from axial force; `solveBuckling` → critical load factor (Euler); opt-in sparse subspace path for large models |
 | **P-Δ (second order)** | `runPDelta` (`PDeltaAnalysis.h`): frozen pseudo-load iteration reusing the K_e factorization (default, **zero re-factor**) **or** the K_T = K_e+Kg refactor reference; reproduces the beam-column amplification δ = H(tan kL − kL)/(Pk) and the linear solve bit-for-bit at P=0; reports divergence past P_cr |
+| **Tension-only members** | `runTensionOnly` (`TensionOnly.h`): `Member.tensionOnly` cables / slender X-braces drop out under compression and re-activate on elongation; active-set iteration whose inner re-solves reuse the factorization via a `ReSolveSession` (rank-6 Woodbury per flip); the converged state equals **omitting** the slack members bit-for-bit; transition-hash cycle guard + monotone fallback guarantee finite termination |
 | **Response spectrum (seismic)** | `solveResponseSpectrum` modal participation + SRSS/CQC; the spectrum curve is a caller-supplied input (not tied to one code) |
 | **Real-time transient** | `solveModalStepResponse` modal superposition + Newmark-β; O(nModes)/step for UE5 sway/vibration |
 

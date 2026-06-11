@@ -224,6 +224,39 @@ inline void pdeltaColumn(FrameModel& m, int nElem, real L, real P, real H,
     m.nodalLoads = { nl };
 }
 
+// X-braced portal in the global X-Z plane (out-of-plane Uy pinned at the free top nodes), for
+// tension-only tests. Stocky columns/beam (section index 0) form a stable moment frame; the two
+// SLENDER diagonals (section index 1) are flagged tension-only. node0/1 = base (encastre),
+// node2/3 = top (Uy pinned). Lateral H (+X) and downward V at the top. Members: 0=col L, 1=col R,
+// 2=beam, 3=brace A (0->3), 4=brace B (1->2). Under pure lateral H one diagonal compresses and, as
+// a tension-only member, drops out -> the converged state equals the model with that brace omitted.
+inline void xBracedPortal(FrameModel& m, real H, real V,
+                          const Material& mat, const Section& stocky, const Section& brace) {
+    m = FrameModel{};
+    m.materials.push_back(mat);
+    m.sections.push_back(stocky);   // index 0: columns + beam
+    m.sections.push_back(brace);    // index 1: slender diagonals
+    Node n0(0, 0,    0, 0);    n0.fixAll();
+    Node n1(1, 6000, 0, 0);    n1.fixAll();
+    Node n2(2, 0,    0, 3000); n2.fixed[Uy] = true;
+    Node n3(3, 6000, 0, 3000); n3.fixed[Uy] = true;
+    m.nodes = { n0, n1, n2, n3 };
+    auto add = [&](int id, int i, int j, int sec, bool tonly) {
+        Member mm(id, i, j, 0, sec);
+        mm.refVec = Vec3(0, 1, 0);     // +Y is out of plane for every member here (no degeneracy)
+        mm.tensionOnly = tonly;
+        m.members.push_back(mm);
+    };
+    add(0, 0, 2, 0, false);   // column L
+    add(1, 1, 3, 0, false);   // column R
+    add(2, 2, 3, 0, false);   // beam
+    add(3, 0, 3, 1, true);    // brace A (tension-only diagonal)
+    add(4, 1, 2, 1, true);    // brace B (tension-only diagonal)
+    NodalLoad l2; l2.node = 2; l2.comp[Ux] = H; l2.comp[Uz] = -V;
+    NodalLoad l3; l3.node = 3; l3.comp[Uz] = -V;
+    m.nodalLoads = { l2, l3 };
+}
+
 // ---------------------------------------------------------------------------
 // Shell (MITC4) fixtures. Geometry in the global X-Y plane (facet normal +Z), so
 // at milestone 2 (plate bending only) the in-plane DOFs (Ux,Uy,Rz) are restrained
