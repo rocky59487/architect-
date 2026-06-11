@@ -1,59 +1,63 @@
-// frame_cli — a tiny stdin/stdout driver around frame::solve for the OpenSees offline
-// comparison harness (#14). It reads a line-based model description and prints the solved
-// node displacements + member end forces at full precision, so Tools/opensees_compare.py
-// can diff the SAME model solved by OpenSeesPy and by an analytic oracle. Engine-only;
-// never linked into the game. Units: N, mm, MPa.
+// frame_cli -- stdin/stdout driver around the FrameCore analyses (OpenSees harness #14 + the S6
+// Grasshopper / external-client bridge). Reads a line-based model description and prints the solved
+// state at full precision. Engine-only; never linked into the game. Units: N, mm, MPa.
+//
+// DAEMON MODE (S6 J1.5): the driver loops over model BLOCKS. Each block ends at `END`; the driver
+// solves it, prints its output, then a lone `EOR` (end-of-response) line + flushes, and resets for
+// the next block. A client that keeps the pipe open streams many blocks through ONE process (the
+// PreparedSystem/ReSolveSession reuse is a future optimisation; results are already identical to an
+// independent cli per block). A single-shot client (model + END + EOF) is the one-block case and is
+// byte-for-byte unchanged; the trailing EOR is an unknown token the OpenSees harness ignores.
 //
 // INPUT (whitespace/line tokens; MAT/SMAT/SEC must precede the elements that index them):
-//   MAT    E G rho                                    (beam material; nu unused -> 0)
-//   SMAT   E nu G                                     (shell material; carries nu)
+//   MAT    E G rho  [capComp capTens capShear]         (beam material; nu=0. Optional allowable cap
+//                                                        for SIZEOPT / D-C; default make(300,300,180).
+//                                                        1 cap value -> tens=comp, shear=0.6*comp)
+//   SMAT   E nu G    [capComp capTens capShear]         (shell material; carries nu)
 //   SEC    A Iy Iz J cy cz Asy Asz
 //   NODE   id x y z  fUx fUy fUz fRx fRy fRz  [pUx pUy pUz pRx pRy pRz]
-//          (6 fixed flags 0/1; optional 6 prescribed displacement values, default 0)
-//   MEMBER id i j matIdx secIdx  refx refy refz  [active [tonly]]  (optional 0/1; active default 1,
-//                                                      tonly default 0 = tension-only flag for TONLY)
-//   SHELL  id n0 n1 n2 n3 matIdx t  [active]          (MITC4 flat-shell facet; optional 0/1, default 1)
+//   MEMBER id i j matIdx secIdx  refx refy refz  [active [tonly]]  (active default 1; tonly default 0)
+//   SHELL  id n0 n1 n2 n3 matIdx t  [active]
 //   NLOAD  node Fx Fy Fz Mx My Mz
-//   UDL    member wx wy wz                            (local)
-//   SPRESS shellId p                                  (transverse pressure)
-//   HINGE  member dof Mp                              (plastic hinge: dof 4/5/10/11, signed Mp;
-//                                                      the node-side moment is the caller's NLOAD)
+//   UDL    member wx wy wz                              (local)
+//   SPRESS shellId p
+//   HINGE  member dof Mp                                (dof 4/5/10/11, signed Mp)
 //   OPT    enableReleases useTimoshenko pivotTol
-//   PDELTA path                                       (second-order analysis: 0=frozen reuse,
-//                                                      1=K_T reference; absent/<0 = linear solve.
-//                                                      DISP/MF then report the second-order state;
-//                                                      an extra "PDSTATUS conv div iters" line leads)
-//   TONLY  [maxIter [allowReact]]                      (S6: tension-only active-set eliminator on the
-//                                                      MEMBER ... tonly members; leads "TONLY conv cycled
-//                                                      iters" + "SLACK id..." then the standard state)
-//   SIZEOPT Amin maxIter dcTol                         (S6: fully-stressed sizing of every active member;
-//                                                      leads "SIZEOPT conv iters singular" + per-member
-//                                                      "AREA id A DC" + "WEIGHTVOL sum(A*L)")
-//   DYNC   dt maxTime [rid...]                         (S6: dynamic progressive collapse SUMMARY; trailing
-//                                                      ids = initial removals; emits "DYNC outcome nEvents
-//                                                      nFrames Tend" + per-event "DEVENT t mode nRem nDet")
-//   END
+//   EIGEN  nModes
+//   PDELTA path                                         (0=frozen reuse, 1=K_T ref; absent/<0=linear)
+//   TONLY  [maxIter [allowReact]]                       (tension-only eliminator on MEMBER ... tonly)
+//   SIZEOPT Amin maxIter dcTol                          (fully-stressed sizing of every active member)
+//   DYNC   dt maxTime [rid...]                          (dynamic collapse; trailing ids = removals)
+//   END                                                 (solve this block; daemon resets after)
 // MAT and SMAT append to ONE material pool in input order; matIdx indexes that pool.
-// OUTPUT:
-//   VERSION <sha>                                     (S6: always the first stdout line — build handshake)
+//
+// OUTPUT (per block):
+//   VERSION <sha>                                       (always the first line of a block -- handshake)
 //   SINGULAR <0|1>
-//   DISP nodeId ux uy uz rx ry rz                     (one per node, node order)
-//   RF   nodeId Fx Fy Fz Mx My Mz                     (one per node, node order)
-//   MF   id Ni Vyi Vzi Ti Myi Mzi Nj Vyj Vzj Tj Myj Mzj   (one per member)
-//   SF   id Mxx Myy Mxy Qx Qy Nxx Nyy Nxy                  (one per shell)
+//   DISP nodeId ux uy uz rx ry rz                       (one per node)
+//   RF   nodeId Fx Fy Fz Mx My Mz                       (one per node)
+//   MF   id Ni Vyi Vzi Ti Myi Mzi Nj Vyj Vzj Tj Myj Mzj (one per member)
+//   SF   id Mxx Myy Mxy Qx Qy Nxx Nyy Nxy               (one per shell)
+//   FREQ n omega1 ...                                   (when EIGEN given)
+//   PDSTATUS conv div iters                             (when PDELTA given)
+//   TONLY conv cycled iters / SLACK id... / <state>     (when TONLY given)
+//   SIZEOPT conv iters singular / AREA id A DC / WEIGHTVOL v   (when SIZEOPT given)
+//   DYNC outcome nEvents nFrames Tend / DEVENT t mode nRem nDet / DFRAME t maxAbsU   (when DYNC given)
+//   EOR                                                 (end-of-response sentinel; flushes the block)
 #include "FrameCore/FrameSolver.h"
 #include "FrameCore/ModalAnalysis.h"
 #include "FrameCore/PDeltaAnalysis.h"
-#include "FrameCore/TensionOnly.h"        // S6: TONLY command
-#include "FrameCore/SizeOpt.h"            // S6: SIZEOPT command
-#include "FrameCore/DynamicCollapse.h"    // S6: DYNC command (summary)
-#include "FrameCore/MemberGeometry.h"     // member length for WEIGHTVOL
+#include "FrameCore/TensionOnly.h"
+#include "FrameCore/SizeOpt.h"
+#include "FrameCore/DynamicCollapse.h"
+#include "FrameCore/MemberGeometry.h"
 
 #include <vector>
 #include <string>
 #include <iostream>
 #include <sstream>
 #include <cstdio>
+#include <cmath>
 
 using namespace frame;
 
@@ -62,7 +66,7 @@ using namespace frame;
 #endif
 
 namespace {
-struct RawMat { real E, G, rho, nu; };
+struct RawMat { real E, G, rho, nu; bool hasCap; real capC, capT, capS; };
 struct RawSec { real A, Iy, Iz, J, cy, cz, Asy, Asz; };
 struct RawNode { int id; real x, y, z; int f[6]; real p[6]; };
 struct RawMem { int id, i, j, mat, sec; real rx, ry, rz; int active; int tonly; };
@@ -71,6 +75,94 @@ struct RawNL { int node; real c[6]; };
 struct RawUDL { int member; real wx, wy, wz; };
 struct RawSP { int shell; real p; };
 struct RawHinge { int member, dof; real Mp; };
+
+// All the state of ONE model block (reset between daemon requests).
+struct Block {
+    std::vector<RawMat> mats; std::vector<RawSec> secs;
+    std::vector<RawNode> nodes; std::vector<RawMem> mems; std::vector<RawShell> shes;
+    std::vector<RawNL> nls; std::vector<RawUDL> udls; std::vector<RawSP> sps;
+    std::vector<RawHinge> hins;
+    SolveOptions opt;
+    int nModes = 0;
+    int pdelta = -1;
+    std::string analysis;
+    int  toMaxIter = 32, toAllowReact = 1;
+    real soAmin = 0; int soMaxIter = 40; real soDcTol = 1e-8;
+    real dcDt = 1e-3, dcMaxTime = 0.5;  std::vector<int> dcRemovals;
+    bool empty = true;   // no model tokens seen -> a bare END is a handshake-only request
+};
+
+void parseLine(Block& b, const std::string& tag, std::istringstream& ss) {
+    b.empty = false;
+    if (tag == "MAT") {
+        RawMat m{}; m.nu = 0; m.hasCap = false; ss >> m.E >> m.G >> m.rho;
+        real c; if (ss >> c) { m.hasCap = true; m.capC = c; m.capT = (ss >> c) ? c : m.capC; m.capS = (ss >> c) ? c : real(0.6) * m.capC; }
+        b.mats.push_back(m);
+    } else if (tag == "SMAT") {
+        RawMat m{}; m.rho = 0; m.hasCap = false; ss >> m.E >> m.nu >> m.G;
+        real c; if (ss >> c) { m.hasCap = true; m.capC = c; m.capT = (ss >> c) ? c : m.capC; m.capS = (ss >> c) ? c : real(0.6) * m.capC; }
+        b.mats.push_back(m);
+    } else if (tag == "SEC") { RawSec s{}; ss >> s.A >> s.Iy >> s.Iz >> s.J >> s.cy >> s.cz >> s.Asy >> s.Asz; b.secs.push_back(s); }
+    else if (tag == "NODE") { RawNode n{}; ss >> n.id >> n.x >> n.y >> n.z; for (int k=0;k<6;++k) ss >> n.f[k]; for (int k=0;k<6;++k) ss >> n.p[k]; b.nodes.push_back(n); }
+    else if (tag == "MEMBER") { RawMem mm{}; mm.active = 1; mm.tonly = 0; ss >> mm.id >> mm.i >> mm.j >> mm.mat >> mm.sec >> mm.rx >> mm.ry >> mm.rz;
+                                int act; if (ss >> act) mm.active = act;
+                                int to;  if (ss >> to)  mm.tonly  = to;
+                                b.mems.push_back(mm); }
+    else if (tag == "SHELL") { RawShell s{}; s.active = 1; ss >> s.id >> s.n[0] >> s.n[1] >> s.n[2] >> s.n[3] >> s.mat >> s.t;
+                               int act; if (ss >> act) s.active = act;
+                               b.shes.push_back(s); }
+    else if (tag == "NLOAD") { RawNL l{}; ss >> l.node; for (int k=0;k<6;++k) ss >> l.c[k]; b.nls.push_back(l); }
+    else if (tag == "UDL") { RawUDL u{}; ss >> u.member >> u.wx >> u.wy >> u.wz; b.udls.push_back(u); }
+    else if (tag == "SPRESS") { RawSP s{}; ss >> s.shell >> s.p; b.sps.push_back(s); }
+    else if (tag == "HINGE") { RawHinge h{}; ss >> h.member >> h.dof >> h.Mp; b.hins.push_back(h); }
+    else if (tag == "OPT") { int er=0, ut=0; real pt=1e-12; ss >> er >> ut >> pt; b.opt.enableReleases=er!=0; b.opt.useTimoshenko=ut!=0; b.opt.pivotTol=pt; }
+    else if (tag == "EIGEN") { ss >> b.nModes; }
+    else if (tag == "PDELTA") { ss >> b.pdelta; }
+    else if (tag == "TONLY")  { b.analysis = "TONLY";  int v; if (ss >> v) b.toMaxIter = v; if (ss >> v) b.toAllowReact = v; }
+    else if (tag == "SIZEOPT"){ b.analysis = "SIZEOPT"; real a; int mi; real dt; if (ss >> a) b.soAmin = a; if (ss >> mi) b.soMaxIter = mi; if (ss >> dt) b.soDcTol = dt; }
+    else if (tag == "DYNC")   { b.analysis = "DYNC";   real d; if (ss >> d) b.dcDt = d; if (ss >> d) b.dcMaxTime = d; int rid; while (ss >> rid) b.dcRemovals.push_back(rid); }
+    // unknown tags are ignored (forward-compatible)
+}
+
+FrameModel buildModel(const Block& b) {
+    FrameModel model;
+    model.materials.reserve(b.mats.size());
+    model.sections.reserve(b.secs.size());
+    for (const auto& m : b.mats) {
+        Material fm(m.E, m.G, m.rho); fm.nu = m.nu;
+        fm.cap = m.hasCap ? Capacity::make(m.capC, m.capT, m.capS) : Capacity::make(300, 300, 180);
+        model.materials.push_back(fm);
+    }
+    for (const auto& s : b.secs) {
+        Section fs; fs.A=s.A; fs.Iy=s.Iy; fs.Iz=s.Iz; fs.J=s.J; fs.cy=s.cy; fs.cz=s.cz; fs.Asy=s.Asy; fs.Asz=s.Asz;
+        model.sections.push_back(fs);
+    }
+    model.nodes.reserve(b.nodes.size());
+    for (const auto& n : b.nodes) {
+        Node fn(n.id, n.x, n.y, n.z);
+        for (int k=0;k<6;++k) { fn.fixed[k] = (n.f[k]!=0); fn.prescribed[k] = n.p[k]; }
+        model.nodes.push_back(fn);
+    }
+    model.members.reserve(b.mems.size());
+    for (const auto& mm : b.mems) {
+        Member fmem(mm.id, mm.i, mm.j, mm.mat, mm.sec);
+        fmem.refVec = Vec3(mm.rx, mm.ry, mm.rz);
+        fmem.active = (mm.active != 0);
+        fmem.tensionOnly = (mm.tonly != 0);
+        model.members.push_back(fmem);
+    }
+    model.shells.reserve(b.shes.size());
+    for (const auto& s : b.shes) {
+        ShellQuad sq(s.id, s.n[0], s.n[1], s.n[2], s.n[3], s.mat, s.t);
+        sq.active = (s.active != 0);
+        model.shells.push_back(sq);
+    }
+    for (const auto& l : b.nls) { NodalLoad nl; nl.node=l.node; for (int k=0;k<6;++k) nl.comp[k]=l.c[k]; model.nodalLoads.push_back(nl); }
+    for (const auto& u : b.udls) { MemberUDL mu; mu.member=u.member; mu.w_local=Vec3(u.wx,u.wy,u.wz); model.memberUDLs.push_back(mu); }
+    for (const auto& s : b.sps) { ShellPressure sp; sp.shell=s.shell; sp.p=s.p; model.shellPressures.push_back(sp); }
+    for (const auto& h : b.hins) { model.hinges.push_back(PlasticHinge{ h.member, h.dof, h.Mp }); }
+    return model;
+}
 
 // Standard solved-state output (shared by the linear / P-Delta / tension-only paths).
 void printState(const FrameModel& model, const SolveResult& r) {
@@ -95,104 +187,26 @@ void printState(const FrameModel& model, const SolveResult& r) {
                     sf.Mxx, sf.Myy, sf.Mxy, sf.Qx, sf.Qy, sf.Nxx, sf.Nyy, sf.Nxy);
     }
 }
-}
 
-int main() {
-    // Provenance to stderr; stdout is parsed by the Python audit harness, so it stays clean.
-    std::fprintf(stderr, "# frame_cli | build %s | compiled %s %s\n",
-                 FRAMECORE_BUILD_SHA, __DATE__, __TIME__);
-    std::vector<RawMat> mats; std::vector<RawSec> secs;
-    std::vector<RawNode> nodes; std::vector<RawMem> mems;
-    std::vector<RawShell> shes;
-    std::vector<RawNL> nls; std::vector<RawUDL> udls; std::vector<RawSP> sps;
-    std::vector<RawHinge> hins;
-    SolveOptions opt;
-    int nModes = 0;
-    int pdelta = -1;   // -1 = linear solve; 0 = P-Delta frozen reuse path; 1 = P-Delta K_T reference
-
-    // S6 analysis-mode commands (mutually exclusive; "" = linear/PDelta as before).
-    std::string analysis;
-    int  toMaxIter = 32, toAllowReact = 1;                 // TONLY
-    real soAmin = 0; int soMaxIter = 40; real soDcTol = 1e-8;  // SIZEOPT
-    real dcDt = 1e-3, dcMaxTime = 0.5;  std::vector<int> dcRemovals;  // DYNC
-
-    std::string line;
-    while (std::getline(std::cin, line)) {
-        std::istringstream ss(line);
-        std::string tag; if (!(ss >> tag)) continue;
-        if (tag == "MAT") { RawMat m{}; ss >> m.E >> m.G >> m.rho; m.nu = 0; mats.push_back(m); }
-        else if (tag == "SMAT") { RawMat m{}; ss >> m.E >> m.nu >> m.G; m.rho = 0; mats.push_back(m); }
-        else if (tag == "SEC") { RawSec s{}; ss >> s.A >> s.Iy >> s.Iz >> s.J >> s.cy >> s.cz >> s.Asy >> s.Asz; secs.push_back(s); }
-        else if (tag == "NODE") { RawNode n{}; ss >> n.id >> n.x >> n.y >> n.z; for (int k=0;k<6;++k) ss >> n.f[k]; for (int k=0;k<6;++k) ss >> n.p[k]; nodes.push_back(n); }
-        else if (tag == "MEMBER") { RawMem mm{}; mm.active = 1; mm.tonly = 0; ss >> mm.id >> mm.i >> mm.j >> mm.mat >> mm.sec >> mm.rx >> mm.ry >> mm.rz;
-                                    int act; if (ss >> act) mm.active = act;   // optional token (a FAILED >> writes 0, so guard it)
-                                    int to; if (ss >> to) mm.tonly = to;       // optional tension-only token (S6)
-                                    mems.push_back(mm); }
-        else if (tag == "SHELL") { RawShell s{}; s.active = 1; ss >> s.id >> s.n[0] >> s.n[1] >> s.n[2] >> s.n[3] >> s.mat >> s.t;
-                                   int act; if (ss >> act) s.active = act;     // optional token (a FAILED >> writes 0, so guard it)
-                                   shes.push_back(s); }
-        else if (tag == "NLOAD") { RawNL l{}; ss >> l.node; for (int k=0;k<6;++k) ss >> l.c[k]; nls.push_back(l); }
-        else if (tag == "UDL") { RawUDL u{}; ss >> u.member >> u.wx >> u.wy >> u.wz; udls.push_back(u); }
-        else if (tag == "SPRESS") { RawSP s{}; ss >> s.shell >> s.p; sps.push_back(s); }
-        else if (tag == "HINGE") { RawHinge h{}; ss >> h.member >> h.dof >> h.Mp; hins.push_back(h); }
-        else if (tag == "OPT") { int er=0, ut=0; real pt=1e-12; ss >> er >> ut >> pt; opt.enableReleases=er!=0; opt.useTimoshenko=ut!=0; opt.pivotTol=pt; }
-        else if (tag == "EIGEN") { ss >> nModes; }
-        else if (tag == "PDELTA") { ss >> pdelta; }
-        else if (tag == "TONLY")  { analysis = "TONLY";  int v; if (ss >> v) toMaxIter = v; if (ss >> v) toAllowReact = v; }
-        else if (tag == "SIZEOPT"){ analysis = "SIZEOPT"; real a; int mi; real dt; if (ss >> a) soAmin = a; if (ss >> mi) soMaxIter = mi; if (ss >> dt) soDcTol = dt; }
-        else if (tag == "DYNC")   { analysis = "DYNC";   real d; if (ss >> d) dcDt = d; if (ss >> d) dcMaxTime = d; int rid; while (ss >> rid) dcRemovals.push_back(rid); }
-        else if (tag == "END") break;
-    }
-
-    FrameModel model;
-    model.materials.reserve(mats.size());
-    model.sections.reserve(secs.size());
-    for (const auto& m : mats) { Material fm(m.E, m.G, m.rho); fm.nu = m.nu; fm.cap = Capacity::make(300,300,180); model.materials.push_back(fm); }
-    for (const auto& s : secs) {
-        Section fs; fs.A=s.A; fs.Iy=s.Iy; fs.Iz=s.Iz; fs.J=s.J; fs.cy=s.cy; fs.cz=s.cz; fs.Asy=s.Asy; fs.Asz=s.Asz;
-        model.sections.push_back(fs);
-    }
-    model.nodes.reserve(nodes.size());
-    for (const auto& n : nodes) {
-        Node fn(n.id, n.x, n.y, n.z);
-        for (int k=0;k<6;++k) { fn.fixed[k] = (n.f[k]!=0); fn.prescribed[k] = n.p[k]; }
-        model.nodes.push_back(fn);
-    }
-    model.members.reserve(mems.size());
-    for (const auto& mm : mems) {
-        Member fmem(mm.id, mm.i, mm.j, mm.mat, mm.sec);   // mat/sec are already pool indices
-        fmem.refVec = Vec3(mm.rx, mm.ry, mm.rz);
-        fmem.active = (mm.active != 0);
-        fmem.tensionOnly = (mm.tonly != 0);               // S6: MEMBER ... tonly token
-        model.members.push_back(fmem);
-    }
-    model.shells.reserve(shes.size());
-    for (const auto& s : shes) {
-        ShellQuad sq(s.id, s.n[0], s.n[1], s.n[2], s.n[3], s.mat, s.t);
-        sq.active = (s.active != 0);
-        model.shells.push_back(sq);
-    }
-    for (const auto& l : nls) { NodalLoad nl; nl.node=l.node; for (int k=0;k<6;++k) nl.comp[k]=l.c[k]; model.nodalLoads.push_back(nl); }
-    for (const auto& u : udls) { MemberUDL mu; mu.member=u.member; mu.w_local=Vec3(u.wx,u.wy,u.wz); model.memberUDLs.push_back(mu); }
-    for (const auto& s : sps) { ShellPressure sp; sp.shell=s.shell; sp.p=s.p; model.shellPressures.push_back(sp); }
-    for (const auto& h : hins) { model.hinges.push_back(PlasticHinge{ h.member, h.dof, h.Mp }); }
-
-    // S6: version handshake on stdout (the GH/any client verifies the engine build; the
-    // OpenSees harness ignores unknown leading tokens, so this is back-compatible).
+void runBlock(const Block& b) {
+    // Version handshake first (a bare END = handshake-only request: VERSION then EOR, no solve).
     std::printf("VERSION %s\n", FRAMECORE_BUILD_SHA);
+    if (b.empty || b.nodes.empty()) return;
 
-    if (analysis == "TONLY") {
-        TensionOnlyOptions to; to.maxIter = toMaxIter; to.allowReactivation = (toAllowReact != 0); to.solve = opt;
+    FrameModel model = buildModel(b);
+
+    if (b.analysis == "TONLY") {
+        TensionOnlyOptions to; to.maxIter = b.toMaxIter; to.allowReactivation = (b.toAllowReact != 0); to.solve = b.opt;
         const TensionOnlyResult R = runTensionOnly(model, to);
         std::printf("TONLY %d %d %d\n", R.converged ? 1 : 0, R.cycled ? 1 : 0, R.iterations);
         std::printf("SLACK");
         for (MemberId id : R.slack) std::printf(" %d", id);
         std::printf("\n");
         printState(model, R.finalState);
-        return 0;
+        return;
     }
-    if (analysis == "SIZEOPT") {
-        SizeOptOptions so; so.Amin = soAmin; so.maxIter = soMaxIter; so.dcTol = soDcTol; so.solve = opt;
+    if (b.analysis == "SIZEOPT") {
+        SizeOptOptions so; so.Amin = b.soAmin; so.maxIter = b.soMaxIter; so.dcTol = b.soDcTol; so.solve = b.opt;
         const SizeOptResult R = runSizeOptimization(model, so);
         std::printf("SIZEOPT %d %d %d\n", R.converged ? 1 : 0, R.iterations, R.singular ? 1 : 0);
         real vol = 0;
@@ -205,38 +219,69 @@ int main() {
                 vol += A * norm(model.nodes[(size_t)nj].pos - model.nodes[(size_t)ni].pos);
         }
         std::printf("WEIGHTVOL %.12g\n", vol);
-        return 0;
+        return;
     }
-    if (analysis == "DYNC") {
-        DynCollapseOptions dco; dco.dt = dcDt; dco.maxTime = dcMaxTime; dco.solve = opt;
-        for (int rid : dcRemovals) dco.initialRemovals.push_back((MemberId)rid);
+    if (b.analysis == "DYNC") {
+        DynCollapseOptions dco; dco.dt = b.dcDt; dco.maxTime = b.dcMaxTime; dco.solve = b.opt;
+        for (int rid : b.dcRemovals) dco.initialRemovals.push_back((MemberId)rid);
         const DynCollapseHistory H = runDynamicCollapse(model, dco);
         const real tend = H.frames.empty() ? real(0) : H.frames.back().t;
         std::printf("DYNC %d %d %d %.12g\n", (int)H.outcome, (int)H.events.size(), (int)H.frames.size(), tend);
         for (const DynCollapseEvent& ev : H.events)
             std::printf("DEVENT %.12g %d %d %d\n", ev.t, (int)ev.mode,
                         (int)ev.removedMembers.size(), (int)ev.detached.size());
-        return 0;
+        // J1b: stream a compact per-frame timeline (peak |displacement|) for client-side playback.
+        for (const DynCollapseFrame& fr : H.frames) {
+            real mx = 0; for (real x : fr.u) mx = std::max(mx, std::fabs(x));
+            std::printf("DFRAME %.12g %.12g\n", fr.t, mx);
+        }
+        return;
     }
 
-    // default: linear solve, or P-Delta second-order if PDELTA was given
     SolveResult r;
-    if (pdelta >= 0) {
-        PDeltaOptions po; po.refactorPath = (pdelta != 0); po.maxIter = 5000; po.tolU = 1e-13; po.solve = opt;
+    if (b.pdelta >= 0) {
+        PDeltaOptions po; po.refactorPath = (b.pdelta != 0); po.maxIter = 5000; po.tolU = 1e-13; po.solve = b.opt;
         const PDeltaResult pr = runPDelta(model, po);
         std::printf("PDSTATUS %d %d %d\n", pr.converged ? 1 : 0, pr.diverged ? 1 : 0, pr.iterations);
         r = pr.finalState;
     } else {
-        r = solve(model, opt);
+        r = solve(model, b.opt);
     }
     printState(model, r);
-    if (nModes > 0) {
-        const PreparedSystem ps = assembleAndFactor(model, opt);
-        ModalOptions mo; mo.numModes = nModes;
+    if (b.nModes > 0) {
+        const PreparedSystem ps = assembleAndFactor(model, b.opt);
+        ModalOptions mo; mo.numModes = b.nModes;
         const ModalResult mr = solveModal(ps, mo);
         std::printf("FREQ %d", (int)mr.modes.size());
-        for (const auto& md : mr.modes) std::printf(" %.12g", md.omega);   // rad/s
+        for (const auto& md : mr.modes) std::printf(" %.12g", md.omega);
         std::printf("\n");
     }
+}
+}  // namespace
+
+int main() {
+    // Provenance to stderr; stdout is parsed by clients, so it stays clean.
+    std::fprintf(stderr, "# frame_cli | build %s | compiled %s %s\n",
+                 FRAMECORE_BUILD_SHA, __DATE__, __TIME__);
+
+    Block b;
+    bool inBlock = false;
+    std::string line;
+    while (std::getline(std::cin, line)) {
+        std::istringstream ss(line);
+        std::string tag; if (!(ss >> tag)) continue;
+        if (tag == "END") {
+            runBlock(b);
+            std::printf("EOR\n");
+            std::fflush(stdout);     // daemon: a streaming client reads up to EOR per request
+            b = Block{};             // reset for the next block
+            inBlock = false;
+            continue;
+        }
+        inBlock = true;
+        parseLine(b, tag, ss);
+    }
+    // Lenient: a final block that reached EOF without a trailing END is still solved once.
+    if (inBlock) { runBlock(b); std::printf("EOR\n"); std::fflush(stdout); }
     return 0;
 }

@@ -12,11 +12,18 @@ provenance(`# frame_cli | build <sha> | …`)走 **stderr**,不污染 stdout。
 echo "<model lines>\nEND" | frame_cli.exe
 ```
 
+### Daemon 多請求模式(S6 J1.5)
+驅動器對 **model BLOCK** 迴圈:每個 block 以 `END` 結束 → 求解 → 輸出 → 一行 `EOR`(end-of-response,**flush**)→
+重置接下一個 block。一個保持管線開啟的客戶端可把多個模型**串流經同一行程**(讀到 `EOR` 即一塊完成)。
+單發(model + END + EOF)是單 block 特例,DISP/MF 輸出逐位元不變(`EOR` 是未知 token,舊解析器忽略)。
+**已驗(gate)**:同行程多 block == 各自獨立 cli 逐位元相等。`PreparedSystem`/`ReSolveSession` 跨請求重用是後續最佳化。
+裸 `END`(空 block)= 純握手:只回 `VERSION` + `EOR`。
+
 ## 輸入指令(token,以空白分隔;`MAT`/`SMAT`/`SEC` 必須在引用它們的元素之前)
 | 指令 | 參數 | 說明 |
 |---|---|---|
-| `MAT` | `E G rho` | 梁材料(nu 不用→0)。append 到單一材料池,`matIdx` 索引之 |
-| `SMAT` | `E nu G` | 殼材料(帶 nu)。同池 |
+| `MAT` | `E G rho [capComp capTens capShear]` | 梁材料(nu→0)。同池。**optional cap**(S6 J1b):allowable 給 SIZEOPT/D-C;省略=`make(300,300,180)`;只給 1 值→tens=comp、shear=0.6·comp |
+| `SMAT` | `E nu G [capComp capTens capShear]` | 殼材料(帶 nu)。同池;cap 同上 |
 | `SEC` | `A Iy Iz J cy cz Asy Asz` | 截面;`Wy=Iy/cy`、`Wz=Iz/cz` |
 | `NODE` | `id x y z  fUx fUy fUz fRx fRy fRz  [pUx..pRz]` | 6 個固定旗標 0/1;optional 6 個 prescribed 位移(預設 0) |
 | `MEMBER` | `id i j matIdx secIdx  refx refy refz  [active [tonly]]` | active 預設 1;**`tonly` 預設 0 = tension-only 旗標(供 `TONLY`)** |
@@ -53,6 +60,8 @@ echo "<model lines>\nEND" | frame_cli.exe
 | **`WEIGHTVOL`** | `value` | **S6**:材料體積 ΣA·L(mm³) |
 | **`DYNC`** | `outcome nEvents nFrames Tend` | **S6**:outcome 0=Stable 1=Collapsed 2=MaxSteps 3=Invalid |
 | **`DEVENT`** | `t mode nRemoved nDetached` | **S6**:每個拓撲事件摘要 |
+| **`DFRAME`** | `t maxAbsU` | **S6 J1b**:逐儲存幀的時間 + 峰值\|位移\|(回放時間軸;完整 u/v 串流延後) |
+| **`EOR`** | — | **S6 J1.5**:end-of-response 哨兵 + flush(每 block 一個;daemon 客戶端讀到即知該塊完成) |
 
 數值精度 `%.12g`。未知 token 由客戶端忽略(向後相容:`Tools/opensees_compare.py` 只讀 `SINGULAR/DISP/MF`,新行不影響)。
 
