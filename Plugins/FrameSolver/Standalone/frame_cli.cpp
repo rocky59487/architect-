@@ -18,6 +18,10 @@
 //   HINGE  member dof Mp                              (plastic hinge: dof 4/5/10/11, signed Mp;
 //                                                      the node-side moment is the caller's NLOAD)
 //   OPT    enableReleases useTimoshenko pivotTol
+//   PDELTA path                                       (second-order analysis: 0=frozen reuse,
+//                                                      1=K_T reference; absent/<0 = linear solve.
+//                                                      DISP/MF then report the second-order state;
+//                                                      an extra "PDSTATUS conv div iters" line leads)
 //   END
 // MAT and SMAT append to ONE material pool in input order; matIdx indexes that pool.
 // OUTPUT:
@@ -28,6 +32,7 @@
 //   SF   id Mxx Myy Mxy Qx Qy Nxx Nyy Nxy                  (one per shell)
 #include "FrameCore/FrameSolver.h"
 #include "FrameCore/ModalAnalysis.h"
+#include "FrameCore/PDeltaAnalysis.h"
 
 #include <vector>
 #include <string>
@@ -64,6 +69,7 @@ int main() {
     std::vector<RawHinge> hins;
     SolveOptions opt;
     int nModes = 0;
+    int pdelta = -1;   // -1 = linear solve; 0 = P-Delta frozen reuse path; 1 = P-Delta K_T reference
 
     std::string line;
     while (std::getline(std::cin, line)) {
@@ -85,6 +91,7 @@ int main() {
         else if (tag == "HINGE") { RawHinge h{}; ss >> h.member >> h.dof >> h.Mp; hins.push_back(h); }
         else if (tag == "OPT") { int er=0, ut=0; real pt=1e-12; ss >> er >> ut >> pt; opt.enableReleases=er!=0; opt.useTimoshenko=ut!=0; opt.pivotTol=pt; }
         else if (tag == "EIGEN") { ss >> nModes; }
+        else if (tag == "PDELTA") { ss >> pdelta; }
         else if (tag == "END") break;
     }
 
@@ -120,7 +127,15 @@ int main() {
     for (const auto& s : sps) { ShellPressure sp; sp.shell=s.shell; sp.p=s.p; model.shellPressures.push_back(sp); }
     for (const auto& h : hins) { model.hinges.push_back(PlasticHinge{ h.member, h.dof, h.Mp }); }
 
-    const SolveResult r = solve(model, opt);
+    SolveResult r;
+    if (pdelta >= 0) {
+        PDeltaOptions po; po.refactorPath = (pdelta != 0); po.maxIter = 5000; po.tolU = 1e-13; po.solve = opt;
+        const PDeltaResult pr = runPDelta(model, po);
+        std::printf("PDSTATUS %d %d %d\n", pr.converged ? 1 : 0, pr.diverged ? 1 : 0, pr.iterations);
+        r = pr.finalState;
+    } else {
+        r = solve(model, opt);
+    }
 
     std::printf("SINGULAR %d\n", r.singular ? 1 : 0);
     for (size_t k = 0; k < model.nodes.size(); ++k) {

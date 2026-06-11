@@ -203,6 +203,27 @@ inline void clampedSettlement(FrameModel& m, real L, real delta, const Material&
     m.members = { Member(0, 0, 1, 0, 0), Member(1, 1, 2, 0, 0) };
 }
 
+// P-Delta cantilever COLUMN along +Z (vertical -> exercises the refVec degeneracy fallback).
+// base (node0) encastre, tip (node nElem) free; meshed into nElem equal beams. The tip carries an
+// AXIAL compression P (global -Z) plus a LATERAL load H (global +X), so the whole column is in
+// uniform compression N = P. Second-order tip sway (beam-column theory):
+//   delta = H (tan(kL) - kL)/(P k),  k = sqrt(P/EI),  limit H L^3/(3 E I) as P -> 0.
+// Euler critical load  P_cr = pi^2 E I / (4 L^2).  Use a SQUARE section so EI is unambiguous
+// (Iy == Iz). Tip sway is read on Ux. For modal/buckling/P-Delta tests.
+inline void pdeltaColumn(FrameModel& m, int nElem, real L, real P, real H,
+                         const Material& mat, const Section& sec) {
+    prepMatSec(m, mat, sec);
+    m.nodes.clear(); m.members.clear();
+    for (int k = 0; k <= nElem; ++k) {
+        Node nd(k, 0, 0, L * real(k) / real(nElem));
+        if (k == 0) nd.fixAll();
+        m.nodes.push_back(nd);
+    }
+    for (int k = 0; k < nElem; ++k) m.members.push_back(Member(k, k, k + 1, 0, 0));
+    NodalLoad nl; nl.node = nElem; nl.comp[Uz] = -P; nl.comp[Ux] = H;
+    m.nodalLoads = { nl };
+}
+
 // ---------------------------------------------------------------------------
 // Shell (MITC4) fixtures. Geometry in the global X-Y plane (facet normal +Z), so
 // at milestone 2 (plate bending only) the in-plane DOFs (Ux,Uy,Rz) are restrained

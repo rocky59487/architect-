@@ -1,4 +1,5 @@
 #include "FrameCore/BucklingAnalysis.h"
+#include "FrameCore/PDeltaAnalysis.h"
 #include "FrameCore/Reanalysis.h"
 #include "FrameCore/Combination.h"
 #include "FrameCore/FrameSolver.h"
@@ -1506,6 +1507,57 @@ void testDynamicCollapse() {
     }
 }
 
+void testPDelta() {
+    // Independent P-Delta checks (S3). Cantilever column under axial P + lateral H; Euler P_cr.
+    const real Lc = 6000.0, sideC = 200.0, Hlat = 1000.0, Ec = 200000.0;
+    const real Ic = sideC * sideC * sideC * sideC / 12.0;
+    const real Pcr = kPi * kPi * Ec * Ic / (4.0 * Lc * Lc);
+    Section  pcs = Section::Rectangular(sideC, sideC);
+    Material pcm(Ec, Ec / (2.0 * (1.0 + 0.3)), 7850.0); pcm.cap = Capacity::make(1e9, 1e9, 1e9);
+    const int nE = 8;
+
+    // ---- Check 1: frozen pseudo-load reuse path == K_T refactor reference (one fixed point) ----
+    {
+        const real P = 0.5 * Pcr;
+        FrameModel m; fixtures::pdeltaColumn(m, nE, Lc, P, Hlat, pcm, pcs);
+        PDeltaOptions of;  of.refactorPath = false; of.maxIter = 5000; of.tolU = 1e-13;
+        PDeltaOptions orf; orf.refactorPath = true;
+        const PDeltaResult rf = runPDelta(m, of);
+        const PDeltaResult rr = runPDelta(m, orf);
+        const real rel = relErr(rf.finalState.disp(nE, Ux), rr.finalState.disp(nE, Ux));
+        addRow("P-Delta", "frozen-reuse pseudo-load iteration vs K_T refactor",
+               "two independent second-order paths share one fixed point (cantilever column, P/Pcr=0.5)",
+               "frozen vs reference tip sway", rel, 1e-10, rf.converged && rr.converged && rel < 1e-10);
+    }
+
+    // ---- Check 2: P = 0 degeneracy -> the second-order state IS the linear state, bit-for-bit ----
+    {
+        FrameModel m; fixtures::pdeltaColumn(m, nE, Lc, 0.0, Hlat, pcm, pcs);
+        const PDeltaResult rf = runPDelta(m, PDeltaOptions{});
+        const SolveResult lin = solve(m);
+        real maxAbs = 0;
+        for (size_t g = 0; g < rf.finalState.u.size() && g < lin.u.size(); ++g)
+            maxAbs = std::max(maxAbs, std::fabs(rf.finalState.u[g] - lin.u[g]));
+        addRow("P-Delta", "P = 0 degeneracy",
+               "no compression -> empty Kg -> runPDelta returns the linear solve bit-for-bit (0 iters)",
+               "max |u_pdelta - u_linear|", maxAbs, 0.0, rf.converged && rf.iterations == 0 && maxAbs == 0.0);
+    }
+
+    // ---- Check 3: beyond the Euler load both paths flag divergence (no silent wrong answer) ----
+    {
+        const real P = 1.05 * Pcr;
+        FrameModel m; fixtures::pdeltaColumn(m, nE, Lc, P, Hlat, pcm, pcs);
+        PDeltaOptions of;  of.refactorPath = false; of.maxIter = 5000; of.tolU = 1e-13;
+        PDeltaOptions orf; orf.refactorPath = true;
+        const PDeltaResult rf = runPDelta(m, of);
+        const PDeltaResult rr = runPDelta(m, orf);
+        const bool both = rf.diverged && rr.diverged;
+        addRow("P-Delta", "divergence past P_cr",
+               "frozen sliding-window detector + reference K_T-not-PD both report instability",
+               "both paths diverged (1=yes)", both ? 1.0 : 0.0, 0.5, both);
+    }
+}
+
 }  // namespace
 
 int main() {
@@ -1535,6 +1587,7 @@ int main() {
     testSafetyAndMargin();
     testReanalysis();
     testDynamicCollapse();
+    testPDelta();
 
     int failures = 0;
     std::cout << "Linear-analysis deep audit (post F17-F25 strengthening)\n\n";

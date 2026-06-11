@@ -12,6 +12,15 @@ public class FrameCore : ModuleRules
         CppStandard = CppStandardVersion.Cpp20;   // UE 5.7 / VS2026 no longer allow C++17
         bEnableExceptions = true;   // Eigen may throw / assert
 
+        // Each analysis .cpp keeps its OWN anonymous-namespace numeric helpers (reduceFF, kPi, ...).
+        // Those names repeat across translation units BY DESIGN — they are file-local. A unity/jumbo
+        // build merges several .cpp into one TU, which turns those file-local helpers into COLLIDING
+        // namespace-scope symbols (redefinition + C4459 shadow-as-error), and which files land in the
+        // same blob depends on file count/order — so adding a new analysis file can silently detonate
+        // a pre-existing latent collision. Disable unity for this pure-numeric module: the helpers
+        // stay clean, the build is order-independent, and the compile-time cost here is negligible.
+        bUseUnity = false;
+
         PublicDependencyModuleNames.AddRange(new string[] { "Core" });
 
         // UE-bundled Eigen 3.4.0 (header-only, MPL2). Private so consumers of the

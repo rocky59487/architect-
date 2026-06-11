@@ -51,7 +51,8 @@ compiles as a standalone console gate *and* as an Unreal Engine module.
 | **Pattern loading + envelopes** | `envelope(cases)` component-wise max/min for the most-unfavourable live-load arrangement |
 | **Influence lines / moving loads** | `reactionInfluenceLine` marches a unit load reusing the factorization; cross-checked by Müller-Breslau |
 | **Modal analysis** | consistent mass; `solveModal` generalized eigenproblem `Kφ=ω²Mφ` → natural frequencies + mode shapes |
-| **Linear buckling / P-Δ** | geometric stiffness `Kg` from axial force; `solveBuckling` → critical load factor (Euler) |
+| **Linear buckling** | geometric stiffness `Kg` from axial force; `solveBuckling` → critical load factor (Euler); opt-in sparse subspace path for large models |
+| **P-Δ (second order)** | `runPDelta` (`PDeltaAnalysis.h`): frozen pseudo-load iteration reusing the K_e factorization (default, **zero re-factor**) **or** the K_T = K_e+Kg refactor reference; reproduces the beam-column amplification δ = H(tan kL − kL)/(Pk) and the linear solve bit-for-bit at P=0; reports divergence past P_cr |
 | **Response spectrum (seismic)** | `solveResponseSpectrum` modal participation + SRSS/CQC; the spectrum curve is a caller-supplied input (not tied to one code) |
 | **Real-time transient** | `solveModalStepResponse` modal superposition + Newmark-β; O(nModes)/step for UE5 sway/vibration |
 
@@ -90,8 +91,13 @@ compiles as a standalone console gate *and* as an Unreal Engine module.
   rather than hidden.
 - The dynamics, buckling and response-spectrum analyses are all **linear**: modal analysis and
   modal-superposition transients assume **linear-elastic** behaviour and **proportional** damping;
-  linear buckling gives the **onset** eigenvalue (Euler), not a nonlinear post-buckling path;
-  P-Δ is a geometric-stiffness correction, not large displacement. The modal eigensolver is
+  linear buckling gives the **onset** eigenvalue (Euler), not a nonlinear post-buckling path.
+  `runPDelta` is a **Theory-II linearization**: the axial force is frozen at the first-order solve
+  and the geometric stiffness is a small-sway correction — **not** large displacement (corotational
+  analysis is a later milestone). It converges below `P_cr` and reports `diverged` above it rather
+  than a silent wrong answer; shells do not contribute `Kg` (the same limitation as buckling). The
+  frozen pseudo-load path matches the K_T refactor reference to ~1e-12 and the analytic beam-column
+  closed form to ~1e-5; cross-checked against OpenSees `PDelta` geomTransf. The modal eigensolver is
   **dense** (suited to the modest models of an interactive sim; a sparse Lanczos path is the
   scale-up). The response spectrum does the modal combination only — the **code spectrum curve
   is an input**, not built in.

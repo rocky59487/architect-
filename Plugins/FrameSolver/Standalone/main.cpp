@@ -14,6 +14,7 @@
 #include "FrameCore/Connectivity.h"
 #include "FrameCore/Collapse.h"
 #include "FrameCore/DynamicCollapse.h"
+#include "FrameCore/PDeltaAnalysis.h"
 #include "FrameCore/MemberGeometry.h"
 #include "FrameTestFixtures.h"
 
@@ -1973,6 +1974,61 @@ int main() {
             const real te = hr.events[0].t; int fi = -1;
             for (size_t k = 0; k < hr.frames.size(); ++k) if (std::fabs(hr.frames[k].t - te) < 0.5 * (T / 200.0)) fi = (int)k;
             if (fi >= 0) checkClose("F39 Ritz inherited u1 == static", hr.frames[(size_t)fi].u[(size_t)gdof(1, Uz)], u1_static, 1e-8);
+        }
+    }
+
+    // ---------- F40: P-Delta second-order amplification (frozen vs reference vs beam-column exact) ----------
+    {
+        std::printf("[F40] P-Delta: cantilever column, frozen-reuse vs K_T-reference vs beam-column exact\n");
+        const real Lc = 6000.0, sideC = 200.0, Hlat = 1000.0, Ec = 200000.0;
+        const real Ic = sideC * sideC * sideC * sideC / 12.0;
+        const real kPiC = 3.14159265358979323846;
+        const real Pcr = kPiC * kPiC * Ec * Ic / (4.0 * Lc * Lc);
+        Section  pcs = Section::Rectangular(sideC, sideC);          // square -> Iy == Iz == Ic
+        Material pcm(Ec, Ec / (2.0 * (1.0 + 0.3)), 7850.0); pcm.cap = Capacity::make(1e9, 1e9, 1e9);
+        const int nE = 8;
+
+        for (real frac : { 0.0, 0.3, 0.95 }) {
+            const real P = frac * Pcr;
+            FrameModel m; fixtures::pdeltaColumn(m, nE, Lc, P, Hlat, pcm, pcs);
+            PDeltaOptions of;  of.refactorPath = false; of.maxIter = 5000; of.tolU = 1e-13;
+            PDeltaOptions orf; orf.refactorPath = true;
+            const PDeltaResult rf = runPDelta(m, of);
+            const PDeltaResult rr = runPDelta(m, orf);
+            const std::string at = " (P/Pcr=" + std::to_string(frac) + ")";
+
+            checkTrue(("F40 frozen converged" + at).c_str(),    rf.converged, rf.finalState.diagnostic);
+            checkTrue(("F40 reference converged" + at).c_str(), rr.converged, rr.finalState.diagnostic);
+            const real tipFrozen = rf.finalState.disp(nE, Ux);
+            const real tipRef    = rr.finalState.disp(nE, Ux);
+
+            // frozen pseudo-load iteration and the K_T refactor reach the SAME second-order fixed point
+            checkClose(("F40 frozen == reference" + at).c_str(), tipFrozen, tipRef, 1e-10);
+
+            // reference vs the beam-column stability-function closed form (8-element discretization)
+            real tipExact;
+            if (P > 0) { const real kk = std::sqrt(P / (Ec * Ic)); tipExact = Hlat * (std::tan(kk * Lc) - kk * Lc) / (P * kk); }
+            else       { tipExact = Hlat * Lc * Lc * Lc / (3.0 * Ec * Ic); }
+            checkClose(("F40 reference == beam-column exact" + at).c_str(), tipRef, tipExact, 1e-3);
+
+            if (frac == 0.0) {
+                // P = 0 degeneracy: the second-order state is the linear state, bit-for-bit, in 0 iters
+                const SolveResult linr = solve(m);
+                checkTrue("F40 P=0 frozen bit-identical to linear", tipFrozen == linr.disp(nE, Ux), "");
+                checkTrue("F40 P=0 zero iterations", rf.iterations == 0, "iters=" + std::to_string(rf.iterations));
+            }
+        }
+
+        // beyond the Euler load: BOTH paths must report divergence (not a silent wrong answer)
+        {
+            const real P = 1.05 * Pcr;
+            FrameModel m; fixtures::pdeltaColumn(m, nE, Lc, P, Hlat, pcm, pcs);
+            PDeltaOptions of;  of.refactorPath = false; of.maxIter = 5000; of.tolU = 1e-13;
+            PDeltaOptions orf; orf.refactorPath = true;
+            const PDeltaResult rf = runPDelta(m, of);
+            const PDeltaResult rr = runPDelta(m, orf);
+            checkTrue("F40 f=1.05 reference diverged (K_T not PD)", rr.diverged, "");
+            checkTrue("F40 f=1.05 frozen diverged (sliding window)", rf.diverged, "iters=" + std::to_string(rf.iterations));
         }
     }
 

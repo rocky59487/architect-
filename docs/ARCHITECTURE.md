@@ -167,6 +167,7 @@ The analysis modules (each a free function + POD result, **no `solve()` flag blo
 | Influence line | `reactionInfluenceLine` (`InfluenceLine.h`) | unit load marched, reusing the factorization |
 | Modal | `solveModal` (`ModalAnalysis.h`) | generalized eigenproblem `Kφ=ω²Mφ` (dense) |
 | Buckling | `solveBuckling` (`BucklingAnalysis.h`) | `(-Kg_ff)φ = γ K_ff φ`, λ_cr = 1/γ_max |
+| P-Delta (S3) | `runPDelta` (`PDeltaAnalysis.h`) | second-order Theory-II: frozen pseudo-load `u ← K_e⁻¹(F − Kg u)` reusing the existing LDLᵀ (default, zero re-factor) **or** fresh LDLᵀ of `K_T = K_e+Kg` (reference, Wilson 1987); axial frozen at first order; `F_ff = K_ff·u_lin_ff` shared by both paths; protected geometric extrapolation + 20-step sliding-window divergence detector; bit-for-bit linear at P=0 |
 | Response spectrum | `solveResponseSpectrum` (`ResponseSpectrum.h`) | modal participation + SRSS/CQC |
 | Transient | `solveModalStepResponse` (`ModalDynamics.h`) | Newmark-β per modal coordinate |
 | Debris connectivity | `analyzeConnectivity` (`Connectivity.h`) | union-find over the active-element graph; grounded = reaches a fixed DOF; detached `FragmentCluster` = id lists + closed-form mass/com/inertia (rod + two-triangle lamina), id-sorted accumulation for bit-determinism |
