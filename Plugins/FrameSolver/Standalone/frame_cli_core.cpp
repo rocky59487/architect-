@@ -82,7 +82,9 @@ void parseLine(Block& b, const std::string& tag, std::istringstream& ss) {
     else if (tag == "UDL") { RawUDL u{}; ss >> u.member >> u.wx >> u.wy >> u.wz; b.udls.push_back(u); }
     else if (tag == "SPRESS") { RawSP s{}; ss >> s.shell >> s.p; b.sps.push_back(s); }
     else if (tag == "HINGE") { RawHinge h{}; ss >> h.member >> h.dof >> h.Mp; b.hins.push_back(h); }
-    else if (tag == "OPT") { int er=0, ut=0; real pt=1e-12; ss >> er >> ut >> pt; b.opt.enableReleases=er!=0; b.opt.useTimoshenko=ut!=0; b.opt.pivotTol=pt; }
+    else if (tag == "OPT") { int er=0, ut=0; real pt=1e-12; ss >> er >> ut >> pt; b.opt.enableReleases=er!=0; b.opt.useTimoshenko=ut!=0; b.opt.pivotTol=pt;
+                             int im; if (ss >> im) b.opt.useIncompatibleMembrane = im!=0;   // S8-8a (optional, back-compat)
+                             int dk; if (ss >> dk) b.opt.useDKQPlate            = dk!=0; }  // S8-8b (optional, back-compat)
     else if (tag == "EIGEN") { ss >> b.nModes; }
     else if (tag == "PDELTA") { ss >> b.pdelta; }
     else if (tag == "TONLY")  { b.analysis = "TONLY";  int v; if (ss >> v) b.toMaxIter = v; if (ss >> v) b.toAllowReact = v; }

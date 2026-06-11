@@ -732,6 +732,100 @@ void testShellCornerMoments() {
     }
 }
 
+void testShellS8() {
+    // S8: opt-in QM6 incompatible-mode membrane (8a) + DKQ discrete-Kirchhoff thin plate (8b).
+    const real Es = 30000.0, nu = 0.3;
+    Material smat(Es, Es / (2.0 * (1.0 + nu))); smat.nu = nu;
+    SolveOptions qm6;  qm6.useIncompatibleMembrane = true;
+    SolveOptions dkq;  dkq.useDKQPlate = true;
+
+    // (a) QM6 still reproduces the distorted constant-strain membrane patch (centre-Jacobian).
+    {
+        const real a = 1000.0, t = 10.0, gx = 1e-4, f = Es / (1.0 - nu * nu);
+        FrameModel m; fixtures::membranePatch(m, a, t, 0.4, gx, smat);
+        const SolveResult r = solve(m, qm6);
+        const real NxxExp = t * f * gx;
+        real e = 0; for (const auto& sf : r.shellForces) e = std::max(e, std::fabs(sf.Nxx - NxxExp));
+        const real rel = e / std::fabs(NxxExp);
+        addRow("Shell S8 QM6", "QM6 passes the distorted membrane patch",
+               "constant-strain patch: Nxx == t f gx to machine precision (centre-Jacobian)",
+               "max |Nxx - exact| rel", rel, 1e-8, !r.singular && rel < 1e-8);
+    }
+    // (b) QM6 releases the in-plane membrane lock that cripples Q4 on a slender cantilever.
+    {
+        const real L = 100.0, H = 10.0, t = 1.0, P = 1.0;
+        const real I = t * H * H * H / 12.0, dEB = P * L * L * L / (3.0 * Es * I);
+        auto tip = [&](const SolveOptions& o) -> real {
+            FrameModel m; fixtures::slenderMembraneCantilever(m, L, H, t, 4, 1, P, smat);
+            const SolveResult r = solve(m, o);
+            return r.singular ? 0.0 : std::fabs(r.disp(1 * 5 + 4, Uy));
+        };
+        const real dQ4 = tip(SolveOptions{}), dQM6 = tip(qm6);
+        addRow("Shell S8 QM6", "Q4 membrane LOCKS on slender in-plane bending",
+               "Q4 tip < 60% of Euler-Bernoulli (parasitic shear lock)",
+               "dQ4 / dEB", dQ4 / dEB, 0.60, dQ4 > 0 && dQ4 < 0.60 * dEB);
+        addRow("Shell S8 QM6", "QM6 RELEASES the membrane lock",
+               "QM6 tip within 15% of Euler-Bernoulli AND strictly better than Q4",
+               "|dQM6/dEB - 1|", std::fabs(dQM6 / dEB - 1.0), 0.15,
+               std::fabs(dQM6 - dEB) < 0.15 * dEB && std::fabs(dQM6 - dEB) < std::fabs(dQ4 - dEB));
+    }
+    // (c) DKQ reproduces the distorted constant-curvature patch + is Kirchhoff (zero shear).
+    {
+        const real a = 1000.0, t = 10.0, cc = 1e-6;
+        const real Dfac = Es * t * t * t / (12.0 * (1.0 - nu * nu));
+        FrameModel m; fixtures::platePatchCylindrical(m, a, t, 0.4, cc, smat);
+        const SolveResult r = solve(m, dkq);
+        const real MxxExp = -Dfac * cc;
+        real eM = 0, mQ = 0;
+        for (const auto& sf : r.shellForces) {
+            eM = std::max(eM, std::fabs(sf.Mxx - MxxExp));
+            mQ = std::max(mQ, std::max(std::fabs(sf.Qx), std::fabs(sf.Qy)));
+        }
+        addRow("Shell S8 DKQ", "DKQ passes the distorted curvature patch",
+               "constant-curvature patch: Mxx == -D c to machine precision",
+               "max |Mxx - exact| rel", eM / std::fabs(MxxExp), 1e-8, !r.singular && eM < 1e-8 * std::fabs(MxxExp));
+        addRow("Shell S8 DKQ", "DKQ is Kirchhoff (no transverse shear)",
+               "recovered Qx, Qy are exactly zero", "max |Q|", mQ, 1e-12, mQ < 1e-12);
+    }
+    // (d) DKQ converges to the Kirchhoff thin-plate centre deflection.
+    {
+        const real a = 1000.0, t = 5.0, q = 0.01;
+        const real D = Es * t * t * t / (12.0 * (1.0 - nu * nu));
+        const real wc = 0.00406 * q * a * a * a * a / D;
+        FrameModel m; fixtures::squarePlateShell(m, a, t, 16, q, smat);
+        const SolveResult r = solve(m, dkq);
+        const real w = r.singular ? 1e30 : std::fabs(r.disp(8 * 17 + 8, Uz));
+        addRow("Shell S8 DKQ", "DKQ converges to the Kirchhoff thin-plate deflection",
+               "SS thin plate centre w == 0.00406 q a^4 / D within 2%",
+               "rel err vs Kirchhoff", relErr(w, wc), 2e-2, relErr(w, wc) < 2e-2);
+    }
+    // (e) opt-in orthogonality: on a FLAT plate the in-plane and out-of-plane DOF decouple, so
+    // QM6 (membrane-only) leaves pure-bending Uz bit-for-bit, and DKQ (plate-only) leaves the
+    // in-plane membrane Nxx bit-for-bit -- each opt-in touches ONLY its own block.
+    {
+        const real a = 1000.0, t = 10.0, q = 0.01;
+        FrameModel m; fixtures::clampedPlateShell(m, a, t, 12, q, smat);
+        const real wBase = std::fabs(solve(m).disp(6 * 13 + 6, Uz));
+        const real wQM6  = std::fabs(solve(m, qm6).disp(6 * 13 + 6, Uz));
+        addRow("Shell S8 default", "QM6 (membrane-only) leaves pure bending unchanged",
+               "flat plate decouples in/out-of-plane -> QM6 does not touch Uz",
+               "|wQM6 - wBase| rel", std::fabs(wQM6 - wBase) / std::max<real>(1e-30, wBase), 1e-12,
+               wBase > 0 && std::fabs(wQM6 - wBase) < 1e-12 * wBase);
+    }
+    {
+        const real a = 1000.0, t = 10.0, gx = 1e-4, f = Es / (1.0 - nu * nu);
+        const real NxxExp = t * f * gx;
+        FrameModel m; fixtures::membranePatch(m, a, t, 0.0, gx, smat);
+        real nBase = 0, nDKQ = 0;
+        for (const auto& sf : solve(m).shellForces)      nBase = std::max(nBase, std::fabs(sf.Nxx));
+        for (const auto& sf : solve(m, dkq).shellForces) nDKQ  = std::max(nDKQ,  std::fabs(sf.Nxx));
+        addRow("Shell S8 default", "DKQ (plate-only) leaves pure membrane unchanged",
+               "membrane patch (out-of-plane restrained) -> DKQ does not touch Nxx",
+               "|nDKQ - nBase| rel", std::fabs(nDKQ - nBase) / NxxExp, 1e-12,
+               std::fabs(nDKQ - nBase) < 1e-12 * NxxExp);
+    }
+}
+
 void testSparseModal() {
     // E2 sparse subspace-iteration eigensolver: the opt-in sparse path must reproduce the dense
     // generalized-eigensolver frequencies (same M-normalized modes), on a model big enough that
@@ -1780,6 +1874,7 @@ int main() {
     testMITC4SoftMode();
     testSolveLoadFingerprint();
     testShellCornerMoments();
+    testShellS8();
     testSparseModal();
     testElementRemoval();
     testShellRemoval();

@@ -59,6 +59,17 @@ private:
     real  yl_[4] = { 0, 0, 0, 0 };   // corner y in the facet local 2D frame (mm)
     real  t_   = 0;                  // thickness
     real  E_   = 0, nu_ = 0, G_ = 0; // material
+
+    // S8 opt-in membrane/plate formulation selectors (read from SolveOptions in prepare()).
+    // Both false -> original MITC4 (bilinear Q4 membrane + assumed-shear plate), bit-for-bit.
+    bool  useQM6_ = false;           // 8a: QM6 incompatible-mode membrane
+    bool  useDKQ_ = false;           // 8b: DKQ discrete-Kirchhoff thin-plate bending
+    // Note: QM6 needs NO recover cache. B_inc(0,0)=0 (dP1/dxi=-2xi, dP2/deta=-2eta vanish at
+    // the centre), and ShellElementForces.N is a CENTRE value, so the centre membrane strain
+    // is Bm(0,0)*d with zero bubble contribution -- the existing recover path is already
+    // consistent and simply benefits from the QM6-improved displacement solution. (A future
+    // per-corner membrane output WOULD need the condensed bubble DOF; documented if added.)
+    // DKQ recover branches on useDKQ_ (B_DKQ plate moments, Qx=Qy=0).
 };
 
 } // namespace frame

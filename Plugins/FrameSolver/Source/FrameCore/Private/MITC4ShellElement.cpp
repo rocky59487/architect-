@@ -1,6 +1,7 @@
 #include "MITC4ShellElement.h"
 #include "FrameCore/FrameModel.h"
 #include "FrameCore/SolveResult.h"
+#include "FrameCore/SolveOptions.h"   // prepare() reads opts.useIncompatibleMembrane / useDKQPlate
 
 #include <cmath>
 
@@ -67,6 +68,10 @@ inline real jacobian(const real xl[4], const real yl[4], real xi, real eta,
 using Mat3x12 = Eigen::Matrix<real, 3, 12>;
 using Mat2x12 = Eigen::Matrix<real, 2, 12>;
 using Row12   = Eigen::Matrix<real, 1, 12>;
+using Mat3x4  = Eigen::Matrix<real, 3, 4>;    // QM6 incompatible-mode strain (3 strains x 4 bubble DOF)
+using Mat12x4 = Eigen::Matrix<real, 12, 4>;   // QM6 compatible-incompatible coupling
+using Mat4    = Eigen::Matrix<real, 4, 4>;    // QM6 internal bubble block
+using Row4    = Eigen::Matrix<real, 1, 4>;    // QM6 bubble drilling contribution
 
 // Bending strain-displacement (3x12) in plate DOF order [w,bx,by] x4.
 // kappa = [bx,x ; by,y ; bx,y + by,x].
@@ -226,6 +231,193 @@ Mat12 membraneK(const real xl[4], const real yl[4], real E, real nu, real G, rea
     return K;
 }
 
+// ---- QM6 incompatible-mode membrane (S8-8a, opt-in) -----------------------------
+// Wilson Q6 (1973) + Taylor (1976) correction: add 2 bubble modes phi1=1-xi^2, phi2=1-eta^2
+// on each of u,v (4 element-internal DOF a=[a1,a2,a3,a4]), then static-condense them out.
+//   u_inc = (1-xi^2) a1 + (1-eta^2) a2,   v_inc = (1-xi^2) a3 + (1-eta^2) a4
+// The bubble strain B_inc uses the CENTRE Jacobian J0 (Taylor's correction): integral(B_inc)
+// over the element = 0, so a constant-stress state stores no bubble energy and the distorted-
+// mesh constant-strain patch test passes. This defeats the in-plane (membrane) bending lock
+// that cripples the bilinear Q4 membrane on coarse meshes. Drilling is left untouched.
+inline Mat3x4 BincQM6(const real J0inv[2][2], real xi, real eta) {
+    const real dP1dxi  = -2.0 * xi;    // d(1-xi^2)/dxi   (P1 has no eta dependence)
+    const real dP2deta = -2.0 * eta;   // d(1-eta^2)/deta (P2 has no xi dependence)
+    // dP/dx = Jinv00 dP/dxi + Jinv01 dP/deta ; dP/dy = Jinv10 dP/dxi + Jinv11 dP/deta, with J0.
+    const real dP1dx = J0inv[0][0] * dP1dxi;
+    const real dP1dy = J0inv[1][0] * dP1dxi;
+    const real dP2dx = J0inv[0][1] * dP2deta;
+    const real dP2dy = J0inv[1][1] * dP2deta;
+    Mat3x4 B; B.setZero();
+    B(0, 0) = dP1dx; B(0, 1) = dP2dx;                                      // eps_x  = du_inc/dx
+    B(1, 2) = dP1dy; B(1, 3) = dP2dy;                                      // eps_y  = dv_inc/dy
+    B(2, 0) = dP1dy; B(2, 1) = dP2dy; B(2, 2) = dP1dx; B(2, 3) = dP2dx;    // gamma_xy
+    return B;
+}
+
+// Drilling contribution of the QM6 bubbles (1x4): the bubble part of the Hughes-Brezzi
+// drilling strain thz + 0.5 u,y - 0.5 v,x, i.e. 0.5 du_inc/dy - 0.5 dv_inc/dx (centre J0).
+// CRITICAL: without this, the drilling penalty keeps using the COMPATIBLE rotation (no bubble),
+// so a pure-bending state -- where the membrane needs v ~ x^2 (a bubble mode) to kill parasitic
+// shear -- stores spurious drilling energy that RE-LOCKS what the membrane bubbles released
+// (observed: QM6 unlocked only to -38% instead of ~-1% of the Euler-Bernoulli tip). Letting the
+// drilling rotation track the bubble-enhanced membrane rotation restores the full unlock.
+inline Row4 BdrillIncQM6(const real J0inv[2][2], real xi, real eta) {
+    const real dP1dxi = -2.0 * xi, dP2deta = -2.0 * eta;
+    const real dP1dx = J0inv[0][0] * dP1dxi, dP1dy = J0inv[1][0] * dP1dxi;
+    const real dP2dx = J0inv[0][1] * dP2deta, dP2dy = J0inv[1][1] * dP2deta;
+    Row4 B;
+    B(0, 0) =  0.5 * dP1dy;  B(0, 1) =  0.5 * dP2dy;    // +0.5 du_inc/dy  (a1,a2 = P1,P2 on u)
+    B(0, 2) = -0.5 * dP1dx;  B(0, 3) = -0.5 * dP2dx;    // -0.5 dv_inc/dx  (a3,a4 = P1,P2 on v)
+    return B;
+}
+
+// QM6 membrane + drilling 12x12 in DOF order [u,v,thz] x4. The compatible part is exactly
+// membraneK (reused -> no formula drift); the incompatible bubbles -- coupled to BOTH the
+// membrane strain AND the drilling rotation -- are condensed via
+//   K* = Kc - Kca Kaa^-1 Kca^T   (Kaa is SPD, so the inverse is safe).
+Mat12 membraneK_QM6(const real xl[4], const real yl[4], real E, real nu, real G, real t) {
+    const Mat12 Kc = membraneK(xl, yl, E, nu, G, t);    // compatible Q4 membrane + drilling
+
+    Eigen::Matrix<real, 3, 3> Dm = Eigen::Matrix<real, 3, 3>::Zero();
+    const real f = E / (1.0 - nu * nu);
+    Dm(0, 0) = f;       Dm(0, 1) = nu * f;
+    Dm(1, 0) = nu * f;  Dm(1, 1) = f;
+    Dm(2, 2) = f * (1.0 - nu) * 0.5;
+    const real gamma = G * t;                           // Hughes-Brezzi drilling penalty
+
+    real J0inv[2][2];
+    jacobian(xl, yl, 0.0, 0.0, J0inv);                  // centre Jacobian (constant) for bubbles
+
+    Mat12x4 Kca = Mat12x4::Zero();
+    Mat4    Kaa = Mat4::Zero();
+    for (int a = 0; a < 2; ++a)
+        for (int b = 0; b < 2; ++b) {
+            const real xi = kG[a], eta = kG[b];
+            real Jinv[2][2];
+            const real detJ = jacobian(xl, yl, xi, eta, Jinv);
+            const real w = kW[a] * kW[b] * detJ;
+            const Mat3x12 Bm  = Bmembrane(xl, yl, xi, eta);
+            const Row12   Bd  = Bdrill(xl, yl, xi, eta);
+            const Mat3x4  Bi  = BincQM6(J0inv, xi, eta);
+            const Row4    Bdi = BdrillIncQM6(J0inv, xi, eta);
+            Kca += w * t     * (Bm.transpose() * Dm * Bi);   // membrane coupling
+            Kca += w * gamma * (Bd.transpose() * Bdi);        // drilling coupling
+            Kaa += w * t     * (Bi.transpose() * Dm * Bi);
+            Kaa += w * gamma * (Bdi.transpose() * Bdi);
+        }
+    return Kc - Kca * Kaa.inverse() * Kca.transpose();
+}
+
+// ---- DKQ discrete-Kirchhoff THIN-plate bending (S8-8b, opt-in) -------------------------
+// Batoz & Tahar (1982). A 12-DOF [w,bx,by] x4 plate-bending block (same DOF as plateK -> the
+// same plateToShellMap reuses it), but with NO transverse-shear DOF: the rotation field beta
+// is an 8-node serendipity interpolation whose 4 mid-side rotations are eliminated by enforcing
+// ZERO tangential shear along each edge, so beta is expressed from the corner (w,bx,by). Thin
+// plates only (t/L < ~1/20); mid/thick plates must use the MITC4 plateK. Curvature
+// chi = [bx,x; by,y; bx,y+by,x] matches plateK; Batoz's native DOF (w,theta_x,theta_y) map to
+// mine by theta_x = by, theta_y = -bx (the beta-vs-slope sign squares out of the stiffness and
+// is pinned for moment recovery by the constant-curvature patch test F49a).
+
+// 8-node serendipity values + natural derivatives. Corners 1..4 at (+-1,+-1); mid nodes
+// 5=(0,-1) edge(1,2), 6=(+1,0) edge(2,3), 7=(0,+1) edge(3,4), 8=(-1,0) edge(4,1).
+inline void serendipity8(real xi, real eta, real N[8], real dNx[8], real dNe[8]) {
+    const real xc[4] = { -1, 1, 1, -1 }, ec[4] = { -1, -1, 1, 1 };
+    for (int i = 0; i < 4; ++i) {
+        const real xp = xi * xc[i], ep = eta * ec[i];
+        N[i]   = 0.25 * (1 + xp) * (1 + ep) * (xp + ep - 1);
+        dNx[i] = 0.25 * xc[i] * (1 + ep) * (2 * xp + ep);
+        dNe[i] = 0.25 * ec[i] * (1 + xp) * (xp + 2 * ep);
+    }
+    N[4] = 0.5 * (1 - xi * xi) * (1 - eta);    dNx[4] = -xi * (1 - eta);        dNe[4] = -0.5 * (1 - xi * xi);
+    N[5] = 0.5 * (1 + xi) * (1 - eta * eta);   dNx[5] =  0.5 * (1 - eta * eta); dNe[5] = -eta * (1 + xi);
+    N[6] = 0.5 * (1 - xi * xi) * (1 + eta);    dNx[6] = -xi * (1 + eta);        dNe[6] =  0.5 * (1 - xi * xi);
+    N[7] = 0.5 * (1 - xi) * (1 - eta * eta);   dNx[7] = -0.5 * (1 - eta * eta); dNe[7] = -eta * (1 - xi);
+}
+
+// DKQ edge coefficients per edge k=0..3 connecting corners k and (k+1)%4 (Batoz-Tahar).
+inline void dkqEdgeCoeffs(const real xl[4], const real yl[4],
+                          real a[4], real b[4], real c[4], real d[4], real e[4]) {
+    for (int k = 0; k < 4; ++k) {
+        const int i = k, j = (k + 1) % 4;
+        const real xij = xl[i] - xl[j], yij = yl[i] - yl[j];
+        const real L2 = xij * xij + yij * yij;
+        a[k] = -xij / L2;
+        b[k] = 0.75 * xij * yij / L2;
+        c[k] = (0.25 * xij * xij - 0.5 * yij * yij) / L2;
+        d[k] = -yij / L2;
+        e[k] = (0.25 * yij * yij - 0.5 * xij * xij) / L2;
+    }
+}
+
+// Build Hx,Hy (each 12, Batoz DOF order (w,theta_x,theta_y) per node) from a serendipity
+// value array s (s = N, or N,xi, or N,eta -> same formula gives Hx, Hx,xi, Hx,eta...).
+inline void dkqH(const real s[8], const real a[4], const real b[4], const real c[4],
+                 const real d[4], const real e[4], real Hx[12], real Hy[12]) {
+    for (int n = 0; n < 4; ++n) {
+        const int en = n;            // "next" edge (node n -> n+1), mid node s[4+en]
+        const int ep = (n + 3) % 4;  // "prev" edge (node n-1 -> n), mid node s[4+ep]
+        const real sn = s[4 + en], sp = s[4 + ep];
+        Hx[3 * n + 0] = 1.5 * (a[en] * sn - a[ep] * sp);
+        Hx[3 * n + 1] = b[en] * sn + b[ep] * sp;
+        Hx[3 * n + 2] = s[n] - c[en] * sn - c[ep] * sp;
+        Hy[3 * n + 0] = 1.5 * (d[en] * sn - d[ep] * sp);
+        Hy[3 * n + 1] = -s[n] + e[en] * sn + e[ep] * sp;
+        Hy[3 * n + 2] = -b[en] * sn - b[ep] * sp;
+    }
+}
+
+// DKQ curvature B (3x12) in MY plate DOF [w,bx,by] x4 at (xi,eta). Built in Batoz (w,tx,ty)
+// then column-remapped: B_mine(:,w)=B_B(:,w), B_mine(:,bx)=-B_B(:,ty), B_mine(:,by)=B_B(:,tx).
+inline Mat3x12 BdkqMine(const real xl[4], const real yl[4], real xi, real eta) {
+    real N[8], dNx[8], dNe[8];
+    serendipity8(xi, eta, N, dNx, dNe);
+    real a[4], b[4], c[4], d[4], e[4];
+    dkqEdgeCoeffs(xl, yl, a, b, c, d, e);
+    real Hxx[12], Hyx[12], Hxe[12], Hye[12];          // d/dxi (..x) and d/deta (..e)
+    dkqH(dNx, a, b, c, d, e, Hxx, Hyx);
+    dkqH(dNe, a, b, c, d, e, Hxe, Hye);
+    real Jinv[2][2];
+    jacobian(xl, yl, xi, eta, Jinv);
+    Mat3x12 Bb;                                       // Batoz-order curvature
+    for (int k = 0; k < 12; ++k) {
+        const real Hx_x = Jinv[0][0] * Hxx[k] + Jinv[0][1] * Hxe[k];
+        const real Hx_y = Jinv[1][0] * Hxx[k] + Jinv[1][1] * Hxe[k];
+        const real Hy_x = Jinv[0][0] * Hyx[k] + Jinv[0][1] * Hye[k];
+        const real Hy_y = Jinv[1][0] * Hyx[k] + Jinv[1][1] * Hye[k];
+        Bb(0, k) = Hx_x;            // chi_x  = bx,x
+        Bb(1, k) = Hy_y;           // chi_y  = by,y
+        Bb(2, k) = Hx_y + Hy_x;    // chi_xy = bx,y + by,x
+    }
+    Mat3x12 B;                                        // remap Batoz (w,tx,ty) -> mine (w,bx,by)
+    for (int n = 0; n < 4; ++n) {                     // bx=theta_y, by=-theta_x (pinned by F49a)
+        B.col(3 * n + 0) =  Bb.col(3 * n + 0);        // w
+        B.col(3 * n + 1) =  Bb.col(3 * n + 2);        // bx <-  theta_y
+        B.col(3 * n + 2) = -Bb.col(3 * n + 1);        // by <- -theta_x
+    }
+    return B;
+}
+
+// DKQ plate-bending 12x12 in plate DOF [w,bx,by] x4 (no shear; 2x2 Gauss). G unused (Kirchhoff).
+Mat12 plateK_DKQ(const real xl[4], const real yl[4], real E, real nu, real /*G*/, real t) {
+    Eigen::Matrix<real, 3, 3> Db = Eigen::Matrix<real, 3, 3>::Zero();
+    const real Dfac = E * t * t * t / (12.0 * (1.0 - nu * nu));
+    Db(0, 0) = Dfac;       Db(0, 1) = nu * Dfac;
+    Db(1, 0) = nu * Dfac;  Db(1, 1) = Dfac;
+    Db(2, 2) = Dfac * (1.0 - nu) * 0.5;
+
+    Mat12 K = Mat12::Zero();
+    for (int a = 0; a < 2; ++a)
+        for (int b = 0; b < 2; ++b) {
+            const real xi = kG[a], eta = kG[b];
+            real Jinv[2][2];
+            const real detJ = jacobian(xl, yl, xi, eta, Jinv);
+            const real wgt = kW[a] * kW[b] * detJ;
+            const Mat3x12 Bp = BdkqMine(xl, yl, xi, eta);
+            K += wgt * (Bp.transpose() * Db * Bp);
+        }
+    return K;
+}
+
 // 24x24 consistent mass in the facet's local DOF order [u,v,w,thx,thy,thz] x4. Translational
 // inertia rho*t for u,v,w; rotary inertia rho*t^3/12 for thx,thy,thz (the drilling thz gets the
 // same small rotary term so the mass matrix is positive-definite -> the modal eigenproblem is
@@ -279,7 +471,7 @@ static Eigen::Matrix<real, 12, 24> membraneToShellMap() {
     return P;
 }
 
-bool MITC4ShellElement::prepare(const FrameModel& model, const SolveOptions& /*opts*/, std::string& why) {
+bool MITC4ShellElement::prepare(const FrameModel& model, const SolveOptions& opts, std::string& why) {
     const ShellQuad& sh = model.shells[static_cast<size_t>(s_)];
     id_ = sh.id;
     t_  = sh.t;
@@ -331,8 +523,12 @@ bool MITC4ShellElement::prepare(const FrameModel& model, const SolveOptions& /*o
 
     // ---- 24x24 local stiffness: plate bending mapped into the bending DOFs +
     // membrane (plane stress) + drilling mapped into the in-plane DOFs. ----
-    const Mat12 Kp = plateK(xl_, yl_, E_, nu_, G_, t_);
-    const Mat12 Km = membraneK(xl_, yl_, E_, nu_, G_, t_);
+    useQM6_ = opts.useIncompatibleMembrane;   // 8a: QM6 incompatible-mode membrane (opt-in)
+    useDKQ_ = opts.useDKQPlate;               // 8b: DKQ discrete-Kirchhoff thin plate (opt-in)
+    const Mat12 Kp = useDKQ_ ? plateK_DKQ(xl_, yl_, E_, nu_, G_, t_)
+                             : plateK(xl_, yl_, E_, nu_, G_, t_);
+    const Mat12 Km = useQM6_ ? membraneK_QM6(xl_, yl_, E_, nu_, G_, t_)
+                             : membraneK(xl_, yl_, E_, nu_, G_, t_);
     const Eigen::Matrix<real, 12, 24> Pb = plateToShellMap();
     const Eigen::Matrix<real, 12, 24> Pm = membraneToShellMap();
     kl_.setZero();
@@ -408,11 +604,16 @@ void MITC4ShellElement::recover(const VecX& u, SolveResult& R) const {
     Dm(1, 0) = nu_ * f; Dm(1, 1) = f;
     Dm(2, 2) = f * (1.0 - nu_) * 0.5;
 
-    const Mat3x12 Bb = Bbending(xl_, yl_, 0.0, 0.0);
-    const Mat2x12 Bs = Bshear(xl_, yl_, 0.0, 0.0);
+    const Mat3x12 Bb = useDKQ_ ? BdkqMine(xl_, yl_, 0.0, 0.0) : Bbending(xl_, yl_, 0.0, 0.0);
     const Mat3x12 Bm = Bmembrane(xl_, yl_, 0.0, 0.0);
     const Eigen::Matrix<real, 3, 1> M = Db * (Bb * dp);
-    const Eigen::Matrix<real, 2, 1> Q = Ds * (Bs * dp);
+    Eigen::Matrix<real, 2, 1> Q;
+    if (useDKQ_) {
+        Q.setZero();                                   // DKQ is Kirchhoff: no transverse shear
+    } else {
+        const Mat2x12 Bs = Bshear(xl_, yl_, 0.0, 0.0);
+        Q = Ds * (Bs * dp);
+    }
     const Eigen::Matrix<real, 3, 1> N = t_ * (Dm * (Bm * dm));
 
     ShellElementForces sf;
@@ -426,7 +627,7 @@ void MITC4ShellElement::recover(const VecX& u, SolveResult& R) const {
     const real cxi[4]  = { -1.0, 1.0, 1.0, -1.0 };
     const real ceta[4] = { -1.0, -1.0, 1.0, 1.0 };
     for (int k = 0; k < 4; ++k) {
-        const Mat3x12 Bbk = Bbending(xl_, yl_, cxi[k], ceta[k]);
+        const Mat3x12 Bbk = useDKQ_ ? BdkqMine(xl_, yl_, cxi[k], ceta[k]) : Bbending(xl_, yl_, cxi[k], ceta[k]);
         const Eigen::Matrix<real, 3, 1> Mk = Db * (Bbk * dp);
         sf.MxxC[k] = Mk(0); sf.MyyC[k] = Mk(1); sf.MxyC[k] = Mk(2);
     }

@@ -351,8 +351,10 @@ def model_collapse_states():
 
 
 # ----------------------------------------------------------------- shells (MITC4)
-def run_frame_cli_shell(model):
+def run_frame_cli_shell(model, dkq=False):
     lines = []
+    if dkq:
+        lines.append("OPT 0 0 1e-12 0 1")   # S8-8b: useDKQPlate = 1 (releases/timoshenko/pivot default)
     for m in model["smats"]:
         lines.append(f"SMAT {m['E']} {m['nu']} {m['G']}")
     for n in model["nodes"]:
@@ -380,9 +382,11 @@ def run_frame_cli_shell(model):
     return singular, disp
 
 
-def run_opensees_shell(model):
-    # ShellMITC4 + ElasticMembranePlateSection IS the isotropic Reissner-Mindlin MITC4
-    # shell — the SAME element we implement — so node displacements must agree closely.
+def run_opensees_shell(model, dkq=False):
+    # ShellMITC4 (default) / ShellDKGQ (dkq=True) + ElasticMembranePlateSection. ShellMITC4 IS the
+    # Reissner-Mindlin MITC4 we implement; ShellDKGQ shares the Batoz DKQ thin-plate bending with
+    # our opt-in DKQ path. ShellDKGQ's GQ12 membrane differs from our Q4, so DKQ legs use FLAT
+    # plates (pure bending) where the in-plane membrane is inactive.
     ops.wipe()
     ops.model("basic", "-ndm", 3, "-ndf", 6)
     for n in model["nodes"]:
@@ -395,7 +399,7 @@ def run_opensees_shell(model):
         secTag = s["id"] + 1
         ops.section("ElasticMembranePlateSection", secTag, m["E"], m["nu"], s["t"], 0.0)
         nn = s["n"]
-        ops.element("ShellMITC4", s["id"] + 1, nn[0], nn[1], nn[2], nn[3], secTag)
+        ops.element("ShellDKGQ" if dkq else "ShellMITC4", s["id"] + 1, nn[0], nn[1], nn[2], nn[3], secTag)
     ops.timeSeries("Linear", 1)
     ops.pattern("Plain", 1, 1)
     for l in model.get("nloads", []):
@@ -712,6 +716,30 @@ def main():
         wd = compare_disp(d_mine, d_os)
         okd = wd < TOL_SHELL_VS_OS
         print(f"  disp diff (ours vs OpenSees ShellMITC4) = {wd:.3e}   "
+              f"{'PASS' if okd else 'FAIL'} (tol {TOL_SHELL_VS_OS:.0e})")
+        failures += (0 if okd else 1)
+
+    # ---- DKQ thin-plate cross-validation vs OpenSees ShellDKGQ (S8-8b) ----
+    print("\n" + "-" * 64)
+    print(" DKQ thin plate vs OpenSees ShellDKGQ")
+    print("-" * 64)
+    # DKQ is thin-plate-only; use a FLAT plate (pure bending -> in-plane membrane DOF ~ 0, so the
+    # GQ12-vs-Q4 membrane difference is inactive and only the SHARED Batoz DKQ bending is compared).
+    dkq_models = [
+        shell_plate_model("DKQ thin cantilever plate (flat, pure bending)", 8, 4,
+                          1000.0, 500.0, 5.0, 30000.0, 0.3, 0.0, -20.0),
+    ]
+    for M in dkq_models:
+        sing, d_mine = run_frame_cli_shell(M, dkq=True)
+        ok_os, d_os = run_opensees_shell(M, dkq=True)
+        print(f"\n[{M['name']}]")
+        if sing or ok_os != 0:
+            print(f"  [FAIL] solve flagged singular (ours={sing}, openseesAnalyze={ok_os})")
+            failures += 1
+            continue
+        wd = compare_disp(d_mine, d_os)
+        okd = wd < TOL_SHELL_VS_OS
+        print(f"  disp diff (ours vs OpenSees ShellDKGQ) = {wd:.3e}   "
               f"{'PASS' if okd else 'FAIL'} (tol {TOL_SHELL_VS_OS:.0e})")
         failures += (0 if okd else 1)
 

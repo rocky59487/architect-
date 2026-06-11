@@ -401,6 +401,71 @@ inline void membranePatch(FrameModel& m, real a, real t, real skew, real gx,
                                          gid(i + 1, j + 1), gid(i, j + 1), 0, t));
 }
 
+// Slender in-plane cantilever MEMBRANE (S8-8a: QM6-vs-Q4 membrane-locking pin). A thin
+// rectangle L x H in the xy plane (L >> H), clamped at x=0, end-loaded by a transverse
+// in-plane shear P (+y) lumped uniformly on the x=L edge. Out-of-plane Uz,Rx,Ry are
+// restrained everywhere (pure membrane); the clamped edge fixes Ux,Uy,Rz. The bilinear Q4
+// membrane LOCKS in coarse in-plane bending (parasitic shear -> far too stiff); the QM6
+// bubbles release it. Reference: Euler-Bernoulli tip P L^3 / (3 E I), I = t H^3 / 12.
+inline void slenderMembraneCantilever(FrameModel& m, real L, real H, real t,
+                                      int nx, int ny, real P, const Material& mat) {
+    m = FrameModel{};
+    m.materials.reserve(1);
+    m.materials.push_back(mat);
+    const real hx = L / nx, hy = H / ny;
+    auto gid = [nx](int i, int j) { return j * (nx + 1) + i; };
+    for (int j = 0; j <= ny; ++j)
+        for (int i = 0; i <= nx; ++i) {
+            Node nd(gid(i, j), i * hx, j * hy, 0);
+            nd.fixed[Uz] = nd.fixed[Rx] = nd.fixed[Ry] = true;          // pure membrane
+            if (i == 0) { nd.fixed[Ux] = nd.fixed[Uy] = nd.fixed[Rz] = true; }  // clamped end
+            m.nodes.push_back(nd);
+        }
+    int sid = 0;
+    for (int j = 0; j < ny; ++j)
+        for (int i = 0; i < nx; ++i)
+            m.shells.push_back(ShellQuad(sid++, gid(i, j), gid(i + 1, j),
+                                         gid(i + 1, j + 1), gid(i, j + 1), 0, t));
+    const real per = P / (ny + 1);                                      // lump shear uniformly
+    for (int j = 0; j <= ny; ++j) {
+        NodalLoad nl; nl.node = gid(nx, j); nl.comp[Uy] = per;
+        m.nodalLoads.push_back(nl);
+    }
+}
+
+// Cook's skew membrane (standard QM6 / distorted-membrane benchmark). Trapezoid with corners
+// A(0,0) D(0,44) on the clamped left edge, B(48,44) C(48,60) on the loaded right edge; total
+// in-plane shear P (+y) lumped uniformly on the right edge. Out-of-plane restrained (membrane).
+// The tip (corner C = node(n,n)) vertical displacement converges to ~23.96 (E=1, nu=1/3, t=1,
+// P=1). Coarse Q4 underestimates badly (membrane + skew locking); QM6 is far closer.
+inline void cooksMembrane(FrameModel& m, int n, real P, real t, const Material& mat) {
+    m = FrameModel{};
+    m.materials.reserve(1);
+    m.materials.push_back(mat);
+    auto gid = [n](int i, int j) { return j * (n + 1) + i; };
+    for (int j = 0; j <= n; ++j)
+        for (int i = 0; i <= n; ++i) {
+            const real xi = real(i) / n, eta = real(j) / n;
+            const real x = 48.0 * xi;
+            const real y = (1.0 - xi) * (44.0 * eta) + xi * (44.0 + 16.0 * eta);
+            Node nd(gid(i, j), x, y, 0);
+            nd.fixed[Uz] = nd.fixed[Rx] = nd.fixed[Ry] = true;          // pure membrane
+            if (i == 0) { nd.fixed[Ux] = nd.fixed[Uy] = nd.fixed[Rz] = true; }  // clamped edge
+            m.nodes.push_back(nd);
+        }
+    int sid = 0;
+    for (int j = 0; j < n; ++j)
+        for (int i = 0; i < n; ++i)
+            m.shells.push_back(ShellQuad(sid++, gid(i, j), gid(i + 1, j),
+                                         gid(i + 1, j + 1), gid(i, j + 1), 0, t));
+    // Consistent lumping of a uniform edge traction (total P): half weight at the two end nodes.
+    for (int j = 0; j <= n; ++j) {
+        const real wj = (j == 0 || j == n) ? 0.5 : 1.0;
+        NodalLoad nl; nl.node = gid(n, j); nl.comp[Uy] = wj * P / n;
+        m.nodalLoads.push_back(nl);
+    }
+}
+
 // Fully CLAMPED square plate (boundary nodes encastre, ALL 6 DOF) under uniform
 // pressure q. The interior nodes leave every DOF free — including the in-plane
 // translations (held by the membrane) and the drilling Rz (held only by the drilling
