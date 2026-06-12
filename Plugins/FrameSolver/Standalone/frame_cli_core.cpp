@@ -3,6 +3,7 @@
 #include "FrameCore/FrameSolver.h"
 #include "FrameCore/ModalAnalysis.h"
 #include "FrameCore/PDeltaAnalysis.h"
+#include "FrameCore/CorotationalAnalysis.h"
 #include "FrameCore/TensionOnly.h"
 #include "FrameCore/SizeOpt.h"
 #include "FrameCore/DynamicCollapse.h"
@@ -56,6 +57,7 @@ struct Block {
     int  toMaxIter = 32, toAllowReact = 1;
     real soAmin = 0; int soMaxIter = 40; real soDcTol = 1e-8;
     real dcDt = 1e-3, dcMaxTime = 0.5;  std::vector<int> dcRemovals;
+    int  coSteps = 10, coMaxIter = 50; real coTolR = 1e-9;   // S9 co-rotational
     bool empty = true;
 };
 
@@ -90,6 +92,7 @@ void parseLine(Block& b, const std::string& tag, std::istringstream& ss) {
     else if (tag == "TONLY")  { b.analysis = "TONLY";  int v; if (ss >> v) b.toMaxIter = v; if (ss >> v) b.toAllowReact = v; }
     else if (tag == "SIZEOPT"){ b.analysis = "SIZEOPT"; real a; int mi; real dt; if (ss >> a) b.soAmin = a; if (ss >> mi) b.soMaxIter = mi; if (ss >> dt) b.soDcTol = dt; }
     else if (tag == "DYNC")   { b.analysis = "DYNC";   real d; if (ss >> d) b.dcDt = d; if (ss >> d) b.dcMaxTime = d; int rid; while (ss >> rid) b.dcRemovals.push_back(rid); }
+    else if (tag == "COROT")  { b.analysis = "COROT";  int v; real r; if (ss >> v) b.coSteps = v; if (ss >> v) b.coMaxIter = v; if (ss >> r) b.coTolR = r; }
     // unknown tags are ignored (forward-compatible)
 }
 
@@ -201,6 +204,15 @@ void runBlock(std::string& out, const Block& b) {
             real mx = 0; for (real x : fr.u) mx = std::max(mx, std::fabs(x));
             appendf(out, "DFRAME %.12g %.12g\n", fr.t, mx);
         }
+        return;
+    }
+
+    if (b.analysis == "COROT") {
+        CorotationalOptions co; co.loadSteps = b.coSteps; co.maxIter = b.coMaxIter; co.tolR = b.coTolR; co.solve = b.opt;
+        const CorotationalResult R = runCorotational(model, co);
+        appendf(out, "COROT %d %d %d %d\n", R.converged ? 1 : 0, R.diverged ? 1 : 0,
+                R.loadStepsCompleted, R.totalIterations);
+        printState(out, model, R.finalState);
         return;
     }
 

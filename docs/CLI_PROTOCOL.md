@@ -38,9 +38,10 @@ echo "<model lines>\nEND" | frame_cli.exe
 | **`TONLY`** | `[maxIter [allowReact]]` | **S6**:tension-only 主動集 eliminator(讀 `MEMBER … tonly` 桿) |
 | **`SIZEOPT`** | `Amin maxIter dcTol` | **S6**:全應力 FSD 尺寸優化(全 active 桿) |
 | **`DYNC`** | `dt maxTime [rid…]` | **S6**:連續動力倒塌**摘要**;行尾 ids = initialRemovals |
+| **`COROT`** | `[loadSteps [maxIter [tolR]]]` | **S9**:平面 co-rotational 大位移(NR + load stepping;僅 global XY 平面梁、節點力;拒絕殼/UDL/prescribed/平面外 z/塑鉸) |
 | `END` | — | 結束輸入,開始求解 |
 
-分析模式互斥:`TONLY`/`SIZEOPT`/`DYNC` 出現即設模式(後者覆蓋);皆無 → `PDELTA`(若設)→ 線性 `solve`。
+分析模式互斥:`TONLY`/`SIZEOPT`/`DYNC`/`COROT` 出現即設模式(後者覆蓋);皆無 → `PDELTA`(若設)→ 線性 `solve`。
 
 ## 輸出行(stdout)
 | 行 | 欄位 | 說明 |
@@ -59,6 +60,7 @@ echo "<model lines>\nEND" | frame_cli.exe
 | **`AREA`** | `memberId A DC` | **S6**:優化後面積 + 收斂 D/C |
 | **`WEIGHTVOL`** | `value` | **S6**:材料體積 ΣA·L(mm³) |
 | **`DYNC`** | `outcome nEvents nFrames Tend` | **S6**:outcome 0=Stable 1=Collapsed 2=MaxSteps 3=Invalid |
+| **`COROT`** | `conv div stepsDone iters` | **S9**;後接標準 `SINGULAR/DISP/RF/MF`(finalState);拒絕時 `conv=div=0`、`SINGULAR 1`、DISP 歸零(不 crash) |
 | **`DEVENT`** | `t mode nRemoved nDetached` | **S6**:每個拓撲事件摘要 |
 | **`DFRAME`** | `t maxAbsU` | **S6 J1b**:逐儲存幀的時間 + 峰值\|位移\|(回放時間軸;完整 u/v 串流延後) |
 | **`EOR`** | — | **S6 J1.5**:end-of-response 哨兵 + flush(每 block 一個;daemon 客戶端讀到即知該塊完成) |

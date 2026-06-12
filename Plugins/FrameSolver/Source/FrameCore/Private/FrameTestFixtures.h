@@ -224,6 +224,26 @@ inline void pdeltaColumn(FrameModel& m, int nElem, real L, real P, real H,
     m.nodalLoads = { nl };
 }
 
+// S9 elastica: PLANAR cantilever along +X in the global XY plane, n equal beam elements. Encastre at
+// node 0; tip transverse point load P (+Y) at node n. Out-of-plane DOFs (Uz,Rx,Ry) restrained at every
+// node so the problem is purely planar (large-deflection bending about global Z via Iz). The end-loaded
+// elastica (Bisshopp-Drucker / Mattiasson 1981) gives tip delta_v/L (transverse) and delta_h/L
+// (axial shortening) vs alpha = P L^2 / (E Iz). Used by runCorotational (S9).
+inline void cantileverPlanarTipShearN(FrameModel& m, int n, real L, real P,
+                                      const Material& mat, const Section& sec) {
+    prepMatSec(m, mat, sec);
+    m.nodes.clear(); m.members.clear();
+    for (int k = 0; k <= n; ++k) {
+        Node nd(k, L * real(k) / real(n), 0, 0);
+        nd.fixed[Uz] = nd.fixed[Rx] = nd.fixed[Ry] = true;   // planar: out-of-plane restrained
+        if (k == 0) nd.fixAll();
+        m.nodes.push_back(nd);
+    }
+    for (int k = 0; k < n; ++k) m.members.push_back(Member(k, k, k + 1, 0, 0));
+    NodalLoad nl; nl.node = n; nl.comp[Uy] = P;
+    m.nodalLoads = { nl };
+}
+
 // X-braced portal in the global X-Z plane (out-of-plane Uy pinned at the free top nodes), for
 // tension-only tests. Stocky columns/beam (section index 0) form a stable moment frame; the two
 // SLENDER diagonals (section index 1) are flagged tension-only. node0/1 = base (encastre),

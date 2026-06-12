@@ -54,6 +54,7 @@ cl /nologo /EHsc /std:c++17 /O2 /MD /utf-8 /DEIGEN_MPL2_ONLY /DFRAMECORE_BUILD_S
    Source\FrameCore\Private\DynamicCollapse.cpp ^
    Source\FrameCore\Private\Reanalysis.cpp ^
    Source\FrameCore\Private\PDeltaAnalysis.cpp ^
+   Source\FrameCore\Private\CorotationalAnalysis.cpp ^
    Source\FrameCore\Private\TensionOnly.cpp ^
    Source\FrameCore\Private\SizeOpt.cpp ^
    Source\FrameCore\Private\Topology.cpp ^

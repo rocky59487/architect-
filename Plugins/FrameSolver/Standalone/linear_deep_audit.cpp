@@ -1,5 +1,6 @@
 #include "FrameCore/BucklingAnalysis.h"
 #include "FrameCore/PDeltaAnalysis.h"
+#include "FrameCore/CorotationalAnalysis.h"
 #include "FrameCore/TensionOnly.h"
 #include "FrameCore/SizeOpt.h"
 #include "FrameCore/Topology.h"
@@ -1858,6 +1859,99 @@ void testBESO() {
 
 }  // namespace
 
+void testCorotational() {
+    // S9 planar co-rotational large displacement. Independent oracles: the elastica shooting table,
+    // rigid-rotation frame indifference, the P-Delta degeneration, and the beam-column scope guard.
+    Material cmat(1.0, 0.4, 0.0); cmat.cap = Capacity::make(1e9, 1e9, 1e9);
+    Section csec; csec.A = 100.0; csec.Iy = 1e-3; csec.Iz = 1e-3; csec.J = 1e-3;
+    csec.cy = 1.0; csec.cz = 1.0; csec.Asy = 0.0; csec.Asz = 0.0;
+    const real L = 1.0, E = 1.0, I = 1e-3;
+
+    // ---- Check 1: elastica alpha=5, N=16 -> tip dv/L matches the independent shooting table ----
+    {
+        const real alpha = 5.0, dvExact = 0.7137915236;
+        FrameModel m; fixtures::cantileverPlanarTipShearN(m, 16, L, alpha * E * I / (L * L), cmat, csec);
+        CorotationalOptions co; co.loadSteps = 20; co.maxIter = 80;
+        const CorotationalResult R = runCorotational(m, co);
+        const real dv = R.finalState.u[(size_t)gdof(16, Uy)] / L;
+        addRow("Co-rotational", "large-deflection elastica (Bisshopp-Drucker / Mattiasson)",
+               "transverse end-loaded cantilever tip dv/L vs independent shooting table (alpha=5, N=16)",
+               "rel |dv/L - table|", relErr(dv, dvExact), 2e-3, R.converged && relErr(dv, dvExact) < 2e-3);
+    }
+
+    // ---- Check 2: in-plane rigid-rotation frame indifference (zero spurious force from rotation) ----
+    {
+        const real alpha = 3.0, phi = 0.7, P = alpha * E * I / (L * L);
+        FrameModel m0; fixtures::cantileverPlanarTipShearN(m0, 12, L, P, cmat, csec);
+        CorotationalOptions co; co.loadSteps = 15; co.maxIter = 80;
+        const CorotationalResult R0 = runCorotational(m0, co);
+        FrameModel m1; fixtures::cantileverPlanarTipShearN(m1, 12, L, 0.0, cmat, csec);
+        const real c = std::cos(phi), s = std::sin(phi);
+        for (auto& nd : m1.nodes) { const real x = nd.pos.x, y = nd.pos.y; nd.pos.x = c * x - s * y; nd.pos.y = s * x + c * y; }
+        NodalLoad nl; nl.node = 12; nl.comp[Ux] = -s * P; nl.comp[Uy] = c * P; m1.nodalLoads = { nl };
+        const CorotationalResult R1 = runCorotational(m1, co);
+        auto mag = [](const CorotationalResult& R) { const real ux = R.finalState.u[(size_t)gdof(12, Ux)], uy = R.finalState.u[(size_t)gdof(12, Uy)]; return std::sqrt(ux * ux + uy * uy); };
+        const real rel = relErr(mag(R1), mag(R0));
+        addRow("Co-rotational", "rigid in-plane rotation frame indifference",
+               "rotating model+load by phi leaves |u_tip| invariant (a spurious rigid-rotation force would not)",
+               "rel |u_tip(rotated) - u_tip|", rel, 1e-12, R0.converged && R1.converged && rel < 1e-12);
+    }
+
+    // ---- Check 3: P-Delta degeneration -- small-displacement CR sway == linearized runPDelta ----
+    {
+        const int nE = 6; const real H = 1.0;
+        const real Pcr = kPi * kPi * E * I / (4.0 * H * H);
+        const real Paxial = 0.3 * Pcr, Hlat = 1e-4;
+        auto build = [&](FrameModel& m) {
+            fixtures::prepMatSec(m, cmat, csec); m.nodes.clear(); m.members.clear();
+            for (int k = 0; k <= nE; ++k) { Node nd(k, 0, H * real(k) / nE, 0); nd.fixed[Uz] = nd.fixed[Rx] = nd.fixed[Ry] = true; if (k == 0) nd.fixAll(); m.nodes.push_back(nd); }
+            for (int k = 0; k < nE; ++k) m.members.push_back(Member(k, k, k + 1, 0, 0));
+            NodalLoad nl; nl.node = nE; nl.comp[Uy] = -Paxial; nl.comp[Ux] = Hlat; m.nodalLoads = { nl };
+        };
+        FrameModel mc; build(mc); CorotationalOptions co; co.loadSteps = 12; co.maxIter = 80;
+        const CorotationalResult Rcr = runCorotational(mc, co);
+        FrameModel mp; build(mp); PDeltaOptions po; po.refactorPath = true;
+        const PDeltaResult Rpd = runPDelta(mp, po);
+        // TRUE relative error: the audit relErr() denominator max(1,|b|) would divide by 1.0 here
+        // (sway~0.047) and report an ABSOLUTE error -- divide by |sway| explicitly so the metric is rel.
+        const real a = Rcr.finalState.u[(size_t)gdof(nE, Ux)], bb = Rpd.finalState.u[(size_t)gdof(nE, Ux)];
+        const real rel = std::fabs(a - bb) / std::max<real>(1e-30, std::fabs(bb));
+        addRow("Co-rotational", "P-Delta degeneration (geometric-stiffness limit)",
+               "small-load CR sway == linearized second-order runPDelta (CR tangent generalizes Kg)",
+               "rel |sway_CR - sway_PDelta|", rel, 1.5e-2, Rcr.converged && Rpd.converged && rel < 1.5e-2);
+    }
+
+    // ---- Check 4: beam-column scope guard -- a model with a shell is rejected (not silently wrong) ----
+    {
+        Material smat(30000.0, 11538.0); smat.nu = 0.3; smat.cap = Capacity::make(1e9, 1e9, 1e9);
+        FrameModel m; fixtures::squarePlateShell(m, 1000.0, 10.0, 2, 0.01, smat);
+        const CorotationalResult R = runCorotational(m);
+        const bool guarded = !R.converged && !R.diverged && R.finalState.singular
+                          && R.finalState.diagnostic.find("beam-column only") != std::string::npos;
+        addRow("Co-rotational", "beam-column scope guard (shell model rejected)",
+               "a model containing shells returns Invalid with a clear diagnostic, not a silent wrong solve",
+               "rejected with diagnostic (1=yes)", guarded ? 1.0 : 0.0, 0.5, guarded);
+    }
+
+    // ---- Check 5: small-displacement equilibrium -> base reactions + member end-force recovery ----
+    {
+        // A stiff cantilever in the linear regime: base reaction must balance the tip load EXACTLY
+        // (Ry=-P at any displacement) and the base bending = P*L (small-disp), exercising recover()'s
+        // reaction vector AND the member end-force mapping (b.Mi) -- which the elastica checks never read.
+        Material smat(210000.0, 80769.0, 7850.0); smat.cap = Capacity::make(1e9, 1e9, 1e9);
+        Section ssec = Section::Rectangular(100.0, 100.0);
+        const real Pq = 1000.0, Lq = 2000.0; const int nq = 8;
+        FrameModel m; fixtures::cantileverPlanarTipShearN(m, nq, Lq, Pq, smat, ssec);
+        const CorotationalResult R = runCorotational(m, CorotationalOptions{});
+        const real Ry  = R.finalState.reactions[(size_t)gdof(0, Uy)];
+        const real m0M = std::fabs(R.finalState.memberForces.empty() ? 0.0 : R.finalState.memberForces[0].endI.Mz);
+        const real eRy = relErr(Ry, -Pq), eM = relErr(m0M, Pq * Lq);
+        addRow("Co-rotational", "small-displacement equilibrium (reactions + end-force recovery)",
+               "cantilever base reaction Ry=-P (exact statics) and member-0 |Mz|=P*L (small-disp recover)",
+               "max rel(Ry+P, |Mz|-PL)", std::max(eRy, eM), 1e-2, R.converged && eRy < 1e-6 && eM < 1e-2);
+    }
+}
+
 int main() {
     std::cout << "# build " << FRAMECORE_BUILD_SHA << " | compiled " << __DATE__ << " " << __TIME__ << "\n";
     testShellCombinationEnvelope();
@@ -1890,6 +1984,7 @@ int main() {
     testTensionOnly();
     testSizeOpt();
     testBESO();
+    testCorotational();
 
     int failures = 0;
     std::cout << "Linear-analysis deep audit (post F17-F25 strengthening)\n\n";

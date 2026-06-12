@@ -15,6 +15,7 @@
 #include "FrameCore/Collapse.h"
 #include "FrameCore/DynamicCollapse.h"
 #include "FrameCore/PDeltaAnalysis.h"
+#include "FrameCore/CorotationalAnalysis.h"
 #include "FrameCore/TensionOnly.h"
 #include "FrameCore/SizeOpt.h"
 #include "FrameCore/Topology.h"
@@ -2526,6 +2527,94 @@ int main() {
             const real eD = relErr(wD, wc);
             std::printf("   clamped thin plate wc=%.6g  DKQ N16=%.6g (%.2f%%)\n", wc, wD, 100 * eD);
             checkTrue("DKQ clamped within 3% of Kirchhoff", eD < 0.03, "eD=" + std::to_string(eD));
+        }
+    }
+
+    // ---------- F50: co-rotational large displacement (planar elastica) ----------
+    {
+        std::printf("[F50] co-rotational large displacement: planar cantilever elastica (Mattiasson table)\n");
+        const real kPiLoc = 3.14159265358979323846;
+        // E=1, near-inextensible slender section: A large, I small so the elastica (inextensible) table is
+        // matched (finite EA adds only ~alpha*I/(A L^2) axial strain).
+        Material cmat(1.0, 0.4, 0.0);
+        Section csec; csec.A = 100.0; csec.Iy = 1e-3; csec.Iz = 1e-3; csec.J = 1e-3;
+        csec.cy = 1.0; csec.cz = 1.0; csec.Asy = 0.0; csec.Asz = 0.0;
+        const real L = 1.0, Em = 1.0, Im = 1e-3;
+
+        // WS_F F-3 elastica table: alpha = P L^2/(E I) -> tip delta_v/L (transverse), delta_h/L (shortening)
+        struct Row { real alpha, dv, dh; };
+        const Row tab[] = {
+            { 1.0,  0.3017207738, 0.0564332363 },
+            { 2.0,  0.4934574804, 0.1606417208 },
+            { 5.0,  0.7137915236, 0.3876283607 },
+            { 10.0, 0.8106090249, 0.5549955978 },
+        };
+
+        // (a) mesh convergence to the elastica table
+        auto runTip = [&](int n, real alpha, real& dv, real& dh, int& iters, bool& conv) {
+            FrameModel m; fixtures::cantileverPlanarTipShearN(m, n, L, alpha * Em * Im / (L * L), cmat, csec);
+            CorotationalOptions co; co.loadSteps = std::max(12, (int)(alpha * 3)); co.maxIter = 80;
+            const CorotationalResult R = runCorotational(m, co);
+            conv = R.converged; iters = R.totalIterations;
+            dv = R.finalState.u[(size_t)gdof(n, Uy)] / L;
+            dh = -R.finalState.u[(size_t)gdof(n, Ux)] / L;
+        };
+        for (const Row& r : tab) {
+            real dv4, dh4, dv16, dh16; int it4, it16; bool c4, c16;
+            runTip(4, r.alpha, dv4, dh4, it4, c4);
+            runTip(16, r.alpha, dv16, dh16, it16, c16);
+            std::printf("   alpha=%2.0f exact dv/L=%.6f dh/L=%.6f | N4 dv=%.6f(%.2f%%) | N16 dv=%.6f(%.3f%%) dh=%.6f(%.2f%%) it=%d\n",
+                        r.alpha, r.dv, r.dh, dv4, 100 * relErr(dv4, r.dv), dv16, 100 * relErr(dv16, r.dv),
+                        dh16, 100 * relErr(dh16, r.dh), it16);
+            checkTrue(("F50 converged alpha=" + std::to_string((int)r.alpha)).c_str(), c4 && c16, "");
+            checkTrue(("F50 N4 coarse within 1.5% dv alpha=" + std::to_string((int)r.alpha)).c_str(),
+                      relErr(dv4, r.dv) < 1.5e-2, "e=" + std::to_string(relErr(dv4, r.dv)));
+            checkClose(("F50 N16 dv/L alpha=" + std::to_string((int)r.alpha)).c_str(), dv16, r.dv, 1.5e-3);
+            checkClose(("F50 N16 dh/L alpha=" + std::to_string((int)r.alpha)).c_str(), dh16, r.dh, 5e-3);
+        }
+
+        // (b) in-plane rotational invariance (corotational frame indifference)
+        {
+            const real alpha = 3.0, phi = 0.6, P = alpha * Em * Im / (L * L);
+            FrameModel m0; fixtures::cantileverPlanarTipShearN(m0, 12, L, P, cmat, csec);
+            CorotationalOptions co; co.loadSteps = 15; co.maxIter = 80;
+            const CorotationalResult R0 = runCorotational(m0, co);
+            FrameModel m1; fixtures::cantileverPlanarTipShearN(m1, 12, L, 0.0, cmat, csec);
+            const real cph = std::cos(phi), sph = std::sin(phi);
+            for (auto& nd : m1.nodes) { const real x = nd.pos.x, y = nd.pos.y; nd.pos.x = cph * x - sph * y; nd.pos.y = sph * x + cph * y; }
+            NodalLoad nl; nl.node = 12; nl.comp[Ux] = -sph * P; nl.comp[Uy] = cph * P; m1.nodalLoads = { nl };
+            const CorotationalResult R1 = runCorotational(m1, co);
+            auto mag = [&](const CorotationalResult& R) { const real ux = R.finalState.u[(size_t)gdof(12, Ux)], uy = R.finalState.u[(size_t)gdof(12, Uy)]; return std::sqrt(ux * ux + uy * uy); };
+            const real m0mag = mag(R0), m1mag = mag(R1);
+            std::printf("   rotational invariance: |u_tip| base=%.6g rotated=%.6g rel=%.2e\n", m0mag, m1mag, relErr(m1mag, m0mag));
+            checkTrue("F50 rotated solve converged", R0.converged && R1.converged, "");
+            checkClose("F50 in-plane rotational invariance", m1mag, m0mag, 1e-9);
+        }
+
+        // (c) P-Delta degeneration: small lateral load -> CR sway matches linearized 2nd-order runPDelta.
+        {
+            const int nE = 6; const real Hc = 1.0;
+            const real Pcr = kPiLoc * kPiLoc * Em * Im / (4.0 * Hc * Hc);
+            const real Paxial = 0.3 * Pcr, Hlat = 1e-4;
+            auto build = [&](FrameModel& m) {
+                fixtures::prepMatSec(m, cmat, csec);
+                m.nodes.clear(); m.members.clear();
+                for (int k = 0; k <= nE; ++k) { Node nd(k, 0, Hc * real(k) / nE, 0); nd.fixed[Uz] = nd.fixed[Rx] = nd.fixed[Ry] = true; if (k == 0) nd.fixAll(); m.nodes.push_back(nd); }
+                for (int k = 0; k < nE; ++k) m.members.push_back(Member(k, k, k + 1, 0, 0));
+                NodalLoad nl; nl.node = nE; nl.comp[Uy] = -Paxial; nl.comp[Ux] = Hlat; m.nodalLoads = { nl };
+            };
+            FrameModel mc; build(mc);
+            CorotationalOptions co; co.loadSteps = 12; co.maxIter = 80;
+            const CorotationalResult Rcr = runCorotational(mc, co);
+            FrameModel mp; build(mp);
+            PDeltaOptions po; po.refactorPath = true; po.solve.pivotTol = 1e-12;
+            const PDeltaResult Rpd = runPDelta(mp, po);
+            const real swayCR = Rcr.finalState.u[(size_t)gdof(nE, Ux)];
+            const real swayPD = Rpd.finalState.u[(size_t)gdof(nE, Ux)];
+            std::printf("   P-Delta degeneration: sway CR=%.6e PDelta=%.6e rel=%.2e (Paxial/Pcr=0.3)\n",
+                        swayCR, swayPD, relErr(swayCR, swayPD));
+            checkTrue("F50 P-Delta deg converged", Rcr.converged && Rpd.converged, Rcr.finalState.diagnostic + Rpd.finalState.diagnostic);
+            checkClose("F50 CR sway == P-Delta sway", swayCR, swayPD, 1.2e-2);
         }
     }
 

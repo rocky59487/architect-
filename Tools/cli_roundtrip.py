@@ -52,7 +52,7 @@ def rect(b, d):
 def _parse(rows):
     d = {"VERSION": None, "SINGULAR": None, "DISP": {}, "MF": {},
          "TONLY": None, "SLACK": [], "SIZEOPT": None, "AREA": {}, "WEIGHTVOL": None,
-         "DYNC": None, "DEVENT": [], "DFRAME": [], "_first": None}
+         "DYNC": None, "DEVENT": [], "DFRAME": [], "COROT": None, "_first": None}
     for t in rows:
         if d["_first"] is None:
             d["_first"] = t[0]
@@ -69,6 +69,7 @@ def _parse(rows):
         elif tag == "DYNC":      d["DYNC"] = (int(t[1]), int(t[2]), int(t[3]), float(t[4]))
         elif tag == "DEVENT":    d["DEVENT"].append([float(t[1]), int(t[2]), int(t[3]), int(t[4])])
         elif tag == "DFRAME":    d["DFRAME"].append([float(t[1]), float(t[2])])
+        elif tag == "COROT":     d["COROT"] = (int(t[1]), int(t[2]), int(t[3]), int(t[4]))
     return d
 
 
@@ -231,6 +232,31 @@ def main():
     check("C API DLL frame_capi_solve_text == frame_cli.exe (byte-identical)",
           same and bool(capi_ver),
           "identical=%s capi_sha=%s len=%d" % (same, capi_ver, len(capi_out)))
+
+    # ---- 8: COROT planar cantilever elastica (S9) -- large-displacement tip vs Mattiasson table ----
+    def planar_cantilever(n, Lp, Pp, E=1.0, A=100.0, Iz=1e-3):
+        lines = ["MAT {} 0.4 0".format(E), "SEC {} {} {} {} 1 1 0 0".format(A, Iz, Iz, Iz)]
+        for k in range(n + 1):
+            x = Lp * k / n
+            # node 0 encastre; others: in-plane (Ux,Uy,Rz) free, out-of-plane (Uz,Rx,Ry) fixed.
+            flags = "1 1 1 1 1 1" if k == 0 else "0 0 1 1 1 0"
+            lines.append("NODE {} {} 0 0 {} 0 0 0 0 0 0".format(k, x, flags))
+        for k in range(n):
+            lines.append("MEMBER {} {} {} 0 0 0 0 1".format(k, k, k + 1))
+        lines.append("NLOAD {} 0 {} 0 0 0 0".format(n, Pp))   # transverse +Y tip load
+        return lines
+
+    alpha, Lp, Ee, Iz, n = 5.0, 1.0, 1.0, 1e-3, 16
+    Pp = alpha * Ee * Iz / Lp ** 2
+    d = run(planar_cantilever(n, Lp, Pp) + ["COROT 20 80 1e-9"])
+    co = d["COROT"]
+    dv = d["DISP"][n][1] / Lp     # tip Uy / L (transverse)
+    dh = -d["DISP"][n][0] / Lp    # -tip Ux / L (axial shortening)
+    dv_exact, dh_exact = 0.7137915236, 0.3876283607   # WS_F F-3 elastica table, alpha=5
+    check("COROT planar elastica alpha=5 (tip dv/L,dh/L vs Mattiasson; converged, not diverged)",
+          co is not None and co[0] == 1 and co[1] == 0
+          and abs(dv - dv_exact) < 2e-3 and abs(dh - dh_exact) < 5e-3,
+          "COROT=%s dv=%.6f(exp %.6f) dh=%.6f(exp %.6f)" % (co, dv, dv_exact, dh, dh_exact))
 
     print("\n%s  (failures=%d)" % ("ALL PASS" if _fails == 0 else "FAILURES", _fails))
     return 0 if _fails == 0 else 1
