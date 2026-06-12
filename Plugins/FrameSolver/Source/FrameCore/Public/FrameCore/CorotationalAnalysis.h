@@ -5,8 +5,8 @@
 
 namespace frame {
 
-// POD options for runCorotational (S9). Load-controlled Newton-Raphson over `loadSteps` equal
-// increments of a single proportional load factor lambda: 0 -> 1 applied to all nodal force loads.
+// POD options for runCorotational (S9-S9c). Default load-control uses `loadSteps` equal increments
+// of a single proportional load factor lambda: 0 -> 1 applied to nodal and equivalent member loads.
 // POD/std only -- no Eigen, no UE -- so this stays on the pure public boundary (same as PDeltaOptions).
 struct CorotationalOptions {
     int  loadSteps = 10;     // equal lambda increments 0->1 (more steps reach larger displacement
@@ -15,7 +15,7 @@ struct CorotationalOptions {
                              //   means raise loadSteps, not a bug).
     real tolR      = 1e-9;   // convergence: ||residual_free|| / ||lambda*F_ext_free||   (force residual)
     real tolU      = 1e-12;  // convergence: ||du_free|| / max(1,||u_free||)             (displacement)
-    SolveOptions solve;      // pivotTol passthrough (useTimoshenko reserved; planar v1 is Euler-Bernoulli).
+    SolveOptions solve;      // pivotTol passthrough (useTimoshenko reserved; CR uses Euler-Bernoulli beams).
     // --- S9c (all default off -> S9b behaviour bit-for-bit; none enter modelFingerprint) ---
     bool useArcLength      = false;  // Crisfield cylindrical arc-length (snap-through); ignores loadSteps
     real arcLength         = 0;      // arc-length increment Dl (0 -> auto from the first tangent / loadSteps)
@@ -33,7 +33,7 @@ struct CorotationalResult {
     int         loadStepsCompleted = 0;   // lambda increments fully equilibrated (== loadSteps on success)
     int         totalIterations    = 0;   // summed NR iterations across all completed steps
     real        lastResidual       = 0;   // last ||residual_free|| / ||lambda*F_ext_free||
-    SolveResult finalState;          // large-displacement state at lambda=1 (u, reactions, member forces);
+    SolveResult finalState;          // load-control: state at lambda=1; arc-length: final tracked lambda;
                                      // singular flag forwarded on a failed / limit-point / invalid run.
     // --- S9c arc-length path (empty unless useArcLength): load factor + monitored displacement per step ---
     std::vector<real> pathLambda;    // load factor lambda at each completed arc-length increment

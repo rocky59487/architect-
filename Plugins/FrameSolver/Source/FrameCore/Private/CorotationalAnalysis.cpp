@@ -468,11 +468,11 @@ CorotationalResult runCorotational(const FrameModel& model, const CorotationalOp
                                                 // reverses at the limit point, so the path descends past it.
                                                 // (Storing sgn*dut instead makes this case climb monotonically
                                                 // and miss the snap-through -- verified: it breaks F52.)
-            R.pathLambda.push_back(lambda);
-            R.pathDisp.push_back(uu[(size_t)mdof]);
             R.totalIterations = totalIters;
             R.lastResidual = lastRel;
             if (!conv) { R.converged = false; R.loadStepsCompleted = step - 1; recoverState(uu, RR, lambda); return R; }
+            R.pathLambda.push_back(lambda);
+            R.pathDisp.push_back(uu[(size_t)mdof]);
             R.loadStepsCompleted = step;
         }
         if (!R.diverged) R.converged = true;

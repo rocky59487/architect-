@@ -282,7 +282,7 @@ def main():
           co3 is not None and co3[0] == 1 and co3[1] == 0 and abs(dvz - dv_exact) < 2e-3,
           "COROT=%s dvZ=%.6f(exp %.6f)" % (co3, dvz, dv_exact))
 
-    # ---- 11: ARCL shallow-arch snap-through (S9c) -- limit load via arc-length vs von Mises (~0.0059) ----
+    # ---- 11: ARCL shallow-arch snap-through (S9c) -- limit load via arc-length vs OpenSees (~0.0059) ----
     def shallow_arch(b=1.0, h=0.25, E=1.0, A=1.0, I=1e-4):
         lines = ["MAT {} 0.4 0".format(E), "SEC {} {} {} {} 1 1 0 0".format(A, I, I, I)]
         lines.append("NODE 0 0 0 0 1 1 1 1 1 1 0 0 0 0 0 0")              # encastre
@@ -295,7 +295,7 @@ def main():
 
     da = run(shallow_arch() + ["ARCL 0.03 80 40"])
     arc = da["ARCL"]
-    lam_peak_exact = 0.00586   # standalone F52 / von Mises closed form
+    lam_peak_exact = 0.00586   # standalone F52; cross-validated vs OpenSees ArcLength, not a closed form
     check("ARCL shallow-arch snap-through (limit load via arc-length, converged, not diverged)",
           arc is not None and arc[0] == 1 and arc[1] == 0 and arc[2] > 4 and abs(arc[3] - lam_peak_exact) < 5e-4,
           "ARCL=%s lambda_peak=%.5f(exp~%.5f)" % (arc, arc[3] if arc else 0.0, lam_peak_exact))
