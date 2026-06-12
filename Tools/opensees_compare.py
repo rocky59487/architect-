@@ -620,6 +620,92 @@ def run_opensees_pdelta(model):
     return ok, disp
 
 
+def corot_cantilever_model():
+    """3D large-displacement cantilever along +X (12 elements), base encastre, rest fully free. A
+    transverse +Z tip load drives a genuinely 3D large-displacement state (out of the old XY plane).
+    SYMMETRIC section (Iy=Iz) so the local-y/z convention (which differs between our localAxes and
+    OpenSees vecxz) does not bias the comparison. Nodal loads only -- OpenSees corotTransf IGNORES
+    element loads. alpha = P L^2/EI = 3 (moderate large displacement)."""
+    E, A, I = 1.0, 100.0, 1e-3
+    G = E / (2.0 * (1.0 + 0.3))
+    L, nE, alpha = 1.0, 12, 3.0
+    P = alpha * E * I / (L * L)
+    sec = dict(A=A, Iy=I, Iz=I, J=2 * I, cy=1.0, cz=1.0, Asy=0.0, Asz=0.0)
+    nodes = [dict(id=k, x=L * k / nE, y=0.0, z=0.0,
+                  fix=[1, 1, 1, 1, 1, 1] if k == 0 else [0, 0, 0, 0, 0, 0]) for k in range(nE + 1)]
+    members = [dict(id=k, i=k, j=k + 1, mat=0, sec=0, refvec=(0.0, 1.0, 0.0)) for k in range(nE)]
+    nloads = [dict(node=nE, comp=[0.0, 0.0, P, 0, 0, 0])]
+    mats = [dict(E=E, G=G, rho=7850.0)]
+    return dict(name=f"3D co-rotational cantilever (alpha={alpha}, +Z tip load)", materials=mats,
+                sections=[sec], nodes=nodes, members=members, nloads=nloads, tip_node=nE)
+
+
+def run_frame_cli_corot(model):
+    """Drive frame_cli in co-rotational mode. Returns the (converged, diverged, steps, iters) status and
+    the large-displacement node displacements."""
+    lines = []
+    for m in model["materials"]:
+        lines.append(f"MAT {m['E']} {m['G']} {m.get('rho', 7850.0)}")
+    for s in model["sections"]:
+        lines.append("SEC {A} {Iy} {Iz} {J} {cy} {cz} {Asy} {Asz}".format(**s))
+    for n in model["nodes"]:
+        fp = list(n["fix"]) + list(n.get("presc", [0, 0, 0, 0, 0, 0]))
+        lines.append("NODE {} {} {} {} {}".format(n["id"], n["x"], n["y"], n["z"],
+                                                  " ".join(str(v) for v in fp)))
+    for e in model["members"]:
+        rv = e["refvec"]
+        lines.append(f"MEMBER {e['id']} {e['i']} {e['j']} {e['mat']} {e['sec']} {rv[0]} {rv[1]} {rv[2]}")
+    for l in model.get("nloads", []):
+        c = l["comp"]
+        lines.append(f"NLOAD {l['node']} {c[0]} {c[1]} {c[2]} {c[3]} {c[4]} {c[5]}")
+    lines.append("COROT 20 80 1e-9")
+    lines.append("END")
+    p = subprocess.run([CLI], input="\n".join(lines) + "\n", capture_output=True, text=True)
+    if p.returncode != 0:
+        raise RuntimeError("frame_cli corot failed: " + p.stderr)
+    disp, status = {}, None
+    for ln in p.stdout.splitlines():
+        t = ln.split()
+        if not t:
+            continue
+        if t[0] == "COROT":
+            status = (int(t[1]), int(t[2]), int(t[3]), int(t[4]))
+        elif t[0] == "DISP":
+            disp[int(t[1])] = [float(x) for x in t[2:8]]
+    return status, disp
+
+
+def run_opensees_corot(model, steps=20):
+    """OpenSees co-rotational large-displacement solve: geomTransf Corotational + Newton, load applied in
+    `steps` LoadControl increments. corotTransf IGNORES element loads -> nodal loads only."""
+    ops.wipe()
+    ops.model("basic", "-ndm", 3, "-ndf", 6)
+    for n in model["nodes"]:
+        ops.node(n["id"], float(n["x"]), float(n["y"]), float(n["z"]))
+        ops.fix(n["id"], *[int(x) for x in n["fix"]])
+    for e in model["members"]:
+        rv = e["refvec"]
+        ops.geomTransf("Corotational", e["id"] + 1, *rv)
+        m = model["materials"][e["mat"]]
+        s = model["sections"][e["sec"]]
+        ops.element("elasticBeamColumn", e["id"] + 1, e["i"], e["j"],
+                    s["A"], m["E"], m["G"], s["J"], s["Iz"], s["Iy"], e["id"] + 1)
+    ops.timeSeries("Linear", 1)
+    ops.pattern("Plain", 1, 1)
+    for l in model.get("nloads", []):
+        ops.load(l["node"], *[float(x) for x in l["comp"]])
+    ops.constraints("Transformation")
+    ops.numberer("RCM")
+    ops.system("BandGeneral")
+    ops.test("NormDispIncr", 1.0e-10, 100)
+    ops.algorithm("Newton")
+    ops.integrator("LoadControl", 1.0 / steps)
+    ops.analysis("Static")
+    ok = ops.analyze(steps)
+    disp = {n["id"]: [ops.nodeDisp(n["id"], k) for k in range(1, 7)] for n in model["nodes"]}
+    return ok, disp
+
+
 # ----------------------------------------------------------------- driver
 def main():
     if not os.path.exists(CLI):
@@ -640,6 +726,7 @@ def main():
         TOL_SHELL_VS_OS = 1e-3
         TOL_MODAL = 1e-2
         TOL_PDELTA = 2e-2
+        TOL_COROT_VS_OS = 1e-4
     else:
         TOL_DISP_VS_OS, TOL_FORCE_VS_OS, TOL_VS_ANALYTIC = 1e-8, 1e-8, 1e-6
         # Our flat-shell and OpenSees ShellMITC4 are the same element and agree on node
@@ -656,6 +743,11 @@ def main():
         # The TIGHT P-Delta oracle is the analytic beam-column F40 (frozen==reference 1e-12,
         # reference==exact ~1e-5); this leg is a cross-tool consistency check only.
         TOL_PDELTA = 1e-2
+        # 3D co-rotational vs OpenSees geomTransf Corotational: our main-term tangent and OpenSees' full
+        # tangent reach the SAME unique equilibrium (no snap-through), so agreement is set by the solve
+        # tolerances (~1.2e-9 measured). The 1e-6 gate leaves headroom for FP/version/formulation-detail
+        # variation while still catching a real regression (vs the 1e-2 P-Delta cross-tool tol).
+        TOL_COROT_VS_OS = 1e-6
     print(f"  tolerances: {'RELAXED (report)' if relaxed else 'STRICT (gate)'}  "
           f"disp={TOL_DISP_VS_OS:.0e} force={TOL_FORCE_VS_OS:.0e} analytic={TOL_VS_ANALYTIC:.0e}")
 
@@ -788,6 +880,30 @@ def main():
               f"OS-vs-exact={e_ox:.3e}  ours-vs-OS={e_mo:.3e}   "
               f"{'PASS' if okp else 'FAIL'} (tol {TOL_PDELTA:.0e})")
         failures += (0 if okp else 1)
+
+    # ---- 3D co-rotational (large displacement) vs OpenSees geomTransf Corotational (S9b) ----
+    print("\n" + "-" * 64)
+    print(" 3D co-rotational (large displacement) vs OpenSees geomTransf Corotational")
+    print("-" * 64)
+    print("  scope: large-displacement elastica; nodal loads only (corotTransf ignores element loads);")
+    print("         our main-term tangent and OpenSees' full tangent reach the same converged solution.")
+    for M in [corot_cantilever_model()]:
+        st, d_me = run_frame_cli_corot(M)
+        ok_os, d_os = run_opensees_corot(M)
+        print(f"\n[{M['name']}]")
+        conv = st is not None and st[0] == 1 and st[1] == 0
+        if not conv or ok_os != 0:
+            print(f"  [FAIL] corot solve issue (ours={st}, openseesAnalyze={ok_os})")
+            failures += 1
+            continue
+        tn = M["tip_node"]
+        um = math.sqrt(sum(d_me[tn][k] ** 2 for k in range(3)))   # tip translation magnitude
+        uo = math.sqrt(sum(d_os[tn][k] ** 2 for k in range(3)))
+        e_mo = abs(um - uo) / max(abs(uo), 1e-30)
+        okc = e_mo < TOL_COROT_VS_OS
+        print(f"  tip |u|  ours={um:.6g}  OpenSees={uo:.6g}   ours-vs-OS={e_mo:.3e}   "
+              f"{'PASS' if okc else 'FAIL'} (tol {TOL_COROT_VS_OS:.0e})")
+        failures += (0 if okc else 1)
 
     print("\n" + "=" * 64)
     if failures == 0:

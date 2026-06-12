@@ -33,18 +33,20 @@ struct CorotationalResult {
 
 // Co-rotational large-displacement analysis (geometric nonlinearity). Newton-Raphson, load-controlled.
 //
-// SCOPE (v1, honest): PLANAR co-rotational beam in the global XY plane (bending about global Z, using
-// the section Iz, Euler-Bernoulli). Each member rotates with its CURRENT chord; the local strain stays
-// small (small-strain large-rotation CR). Because all rotations are about the single global Z axis they
-// commute, so the nodal rotation is accumulated directly in the Rz displacement DOF -- the spatial
-// incremental-rotation-vector machinery (R_node, exp/log SO(3)) needed for genuine 3D rotation is NOT
-// required here and is reserved for S9b (3D CR; OpenSees CorotCrdTransf3d formulas archived in
-// docs/research/WS_F2_corot3d_opensees.md). The caller MUST restrain the out-of-plane DOFs (Uz, Rx, Ry)
-// at every node (the planar fixtures do); an unrestrained out-of-plane DOF has no CR stiffness and the
-// solve is reported singular.
+// SCOPE (S9b, honest): 3D GENERAL co-rotational beam of ARBITRARY spatial orientation -- torsion + biaxial
+// bending (section Iy/Iz/J, Euler-Bernoulli) + finite SO(3) rotation. Each member co-rotates with its
+// CURRENT chord and section triad; the local strain stays small (small-strain large-rotation CR, NOT a
+// geometrically-exact Reissner beam; the two agree under small strain). Because 3D finite rotations do not
+// commute, each node carries a rotation matrix R_node in SO(3) (initial I) updated by a SPATIAL increment
+// R_node <- exp(skew(dtheta))*R_node after each NR step (avoids the total-rotation-vector 2.pi singularity).
+// In the planar limit (members in XY, rotation about Z) it reduces to the S9 planar formulation -- the
+// planar elastica / rigid-rotation / P-Delta degeneration oracles still pass. The tangent is T^T Kl T +
+// Ksigma1 (the strict axial geometric term); the full spin/moment corrections (Ksigma2/3) are not added
+// (they only accelerate convergence, which is already reached for the elastica alpha=1..10; -> S9c).
 //
 // NO snap-through: a limit point is reported diverged (not tracked); arc-length (Riks/Crisfield) reserved.
-// The main oracle (a transverse end-loaded cantilever's elastica) is monotone, so NR reaches alpha=1..10.
+// Nodal force loads ONLY: member UDLs / prescribed support displacements / formed plastic hinges /
+// tension-only members / member-end releases are REJECTED (singular + diagnostic, never silently wrong).
 //
 // The caller's model is NEVER mutated (internal working copy; safe to call concurrently, same contract as
 // runPDelta / runProgressiveCollapse). A model containing shells is rejected (beam-column only).

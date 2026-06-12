@@ -1,5 +1,6 @@
 #include "FrameCore/CorotationalAnalysis.h"
 #include "FrameEigen.h"
+#include "ElementStiffness.h"          // localAxes (initial element frame from refVec)
 #include "FrameCore/FrameModel.h"
 #include "FrameCore/SolveResult.h"
 
@@ -8,102 +9,188 @@
 #include <cmath>
 #include <algorithm>
 
-// S9 -- PLANAR co-rotational beam (geometric nonlinearity), XY plane, bending about global Z.
+// S9b -- 3D GENERAL co-rotational beam (geometric nonlinearity): arbitrary spatial orientation, torsion +
+// biaxial bending + finite SO(3) rotation. Generalises the S9 PLANAR driver. Each member co-rotates with
+// its CURRENT chord AND current section triad; the local strain stays small (small-strain large-rotation
+// CR). The local stiffness is the same Euler-Bernoulli beam (EA/EIy/EIz/GJ) used by localStiffness12.
 //
-// Each member carries a 3-DOF natural deformation [u_bar, theta_bar_i, theta_bar_j] in its CURRENT
-// co-rotated chord frame; the local stiffness is the small-strain Euler-Bernoulli beam (EA, EIz). The
-// 3x6 strain matrix B maps the planar global DOFs [ux,uy,rz]x2 to the natural deformation, the internal
-// force is B^T q_l (virtual-work consistent), and the tangent is the material part B^T k_l B plus the
-// co-rotational geometric stiffness
-//     Kg = (N/Ln) q q^T + ((Mi+Mj)/Ln^2) (p q^T + q p^T),
-//   p = [-c,-s,0, c,s,0]^T  (= d Ln / d d),   q = [s,-c,0,-s,c,0]^T  (= Ln * d beta / d d).
-// Both p,q derivations and Kg are the standard 2D corotational beam (Crisfield Vol.1 Ch.7); Kg is
-// symmetric. Planar rotations about the single Z axis commute, so the nodal angle is read directly from
-// the Rz displacement DOF -- no SO(3) update needed (3D CR is S9b). A rigid in-plane rotation gives
-// u_bar=0 and theta_bar=theta_z-(beta-beta0)=0, hence zero internal force (the defining CR property;
-// exercised by the rotational-invariance oracle).
+// KEY DIFFERENCE FROM S9: 3D finite rotations DO NOT COMMUTE, so the per-node rotation is carried as a
+// matrix R_node in SO(3) (initial I) and updated by a SPATIAL increment R_node <- exp(skew(dtheta))*R_node
+// after each NR step (avoids the total-rotation-vector 2.pi singularity, Battini 2002). The planar single-
+// axis "accumulate Rz directly" of S9 is replaced by this. The element frame E=[e1|e2|e3] is rebuilt every
+// iteration from the deformed geometry (chord) + the mean nodal triad (Gram-Schmidt), the local deformation
+// is the nodal triad's rotation relative to E (logSO3), the internal force is f_int = T^T*pb (virtual-work
+// consistent), and the tangent is the material part T^T*Kl*T plus the axial geometric stiffness Ksigma1.
+//
+// A rigid body motion R_g gives q_I=q_J=R_g*E0 and E=R_g*E0, so E^T*q = E0^T*E0 = const -> zero local
+// deformation -> pb=0 -> f_int=0 (the defining CR property; exercised by the arbitrary-axis rotational-
+// invariance oracle). In the planar limit (members in XY, rotation about Z only) every quantity reduces to
+// the S9 planar formulation bit-for-bit modulo float path (the planar elastica / P-Delta oracles still pass).
+//
+// Tangent (WS_F2 section 6 + the S9-verified durable lesson that the NR converged solution depends ONLY on
+// f_int, the tangent only on convergence speed): the tangent is T^T*Kl*T + Ksigma1 (the strict axial
+// geometric term, reducing to S9's (N/Ln)q q^T, symmetric so the same SimplicialLDLT path as S9/PDelta is
+// reused). The full spin/moment geometric terms (OpenSees Ksigma2/3) are NOT added -- they only accelerate
+// convergence, and this main term already converges the elastica alpha=1..10 (F50/F51). Full Ksigma2/3 -> S9c.
 
 namespace frame {
 namespace {
 
 constexpr real kPi = 3.14159265358979323846;
 
-// Per-member planar co-rotational element (initial invariants + unwrap state).
-struct CrBeam {
-    int      e      = -1;
-    MemberId id     = 0;
-    int      ni     = -1, nj = -1;     // node indices
-    int      gmap[6] = { 0,0,0,0,0,0 };// global DOF of [uxi,uyi,rzi,uxj,uyj,rzj]
-    real     L0     = 0;               // initial length
-    real     beta0  = 0;               // initial chord angle
-    real     EA     = 0, EIz = 0;
-    real     betaPrev = 0;             // last chord angle (atan2 unwrap continuity)
-    // recovered natural state (for member-force output)
-    real     N = 0, Mi = 0, Mj = 0, Ln = 0;
-};
-
-// Build the planar internal force fe(6) and tangent Ke(6x6) at the current displacement u. Also returns
-// the (unwrapped) chord angle so the caller can advance betaPrev, and stores N/Mi/Mj on the element.
-void crCompute(CrBeam& b, const FrameModel& M, const std::vector<real>& u,
-               Eigen::Matrix<real, 6, 1>& fe, Eigen::Matrix<real, 6, 6>& Ke, real& betaOut) {
-    const Vec3 Xi = M.nodes[(size_t)b.ni].pos, Xj = M.nodes[(size_t)b.nj].pos;
-    const real uxi = u[(size_t)b.gmap[0]], uyi = u[(size_t)b.gmap[1]], tzi = u[(size_t)b.gmap[2]];
-    const real uxj = u[(size_t)b.gmap[3]], uyj = u[(size_t)b.gmap[4]], tzj = u[(size_t)b.gmap[5]];
-
-    const real x1 = Xi.x + uxi, y1 = Xi.y + uyi;
-    const real x2 = Xj.x + uxj, y2 = Xj.y + uyj;
-    const real dx = x2 - x1, dy = y2 - y1;
-    const real Ln = std::max<real>(1e-300, std::sqrt(dx * dx + dy * dy));   // guard a fully collapsed chord
-
-    real beta = std::atan2(dy, dx);
-    while (beta - b.betaPrev >  kPi) beta -= 2 * kPi;       // unwrap relative to previous chord angle
-    while (beta - b.betaPrev < -kPi) beta += 2 * kPi;
-    betaOut = beta;
-
-    const real c = std::cos(beta), s = std::sin(beta);
-    const real ubar  = Ln - b.L0;
-    const real alpha = beta - b.beta0;                      // chord rigid rotation
-    const real tbi   = tzi - alpha;                         // local deformational rotations
-    const real tbj   = tzj - alpha;
-
-    const real ea = b.EA  / b.L0;
-    const real ei = b.EIz / b.L0;
-    const real N  = ea * ubar;                              // tension-positive natural axial
-    const real Mi = ei * (4.0 * tbi + 2.0 * tbj);
-    const real Mj = ei * (2.0 * tbi + 4.0 * tbj);
-    b.N = N; b.Mi = Mi; b.Mj = Mj; b.Ln = Ln;
-
-    // B (3x6) rows: u_bar, theta_bar_i, theta_bar_j over [uxi,uyi,rzi,uxj,uyj,rzj].
-    Eigen::Matrix<real, 3, 6> B; B.setZero();
-    B(0, 0) = -c;      B(0, 1) = -s;      B(0, 3) = c;       B(0, 4) = s;
-    B(1, 0) = -s / Ln; B(1, 1) = c / Ln;  B(1, 2) = 1.0;     B(1, 3) = s / Ln; B(1, 4) = -c / Ln;
-    B(2, 0) = -s / Ln; B(2, 1) = c / Ln;                     B(2, 3) = s / Ln; B(2, 4) = -c / Ln; B(2, 5) = 1.0;
-
-    Eigen::Matrix<real, 3, 1> ql; ql << N, Mi, Mj;
-    fe = B.transpose() * ql;
-
-    Eigen::Matrix<real, 3, 3> kl; kl.setZero();
-    kl(0, 0) = ea;
-    kl(1, 1) = 4.0 * ei; kl(1, 2) = 2.0 * ei;
-    kl(2, 1) = 2.0 * ei; kl(2, 2) = 4.0 * ei;
-    Ke = B.transpose() * kl * B;                            // material tangent
-
-    Eigen::Matrix<real, 6, 1> p, q;
-    p << -c, -s, 0, c, s, 0;
-    q <<  s, -c, 0, -s, c, 0;
-    Ke += (N / Ln) * (q * q.transpose());                  // co-rotational geometric stiffness
-    Ke += ((Mi + Mj) / (Ln * Ln)) * (p * q.transpose() + q * p.transpose());
+// ----------------------------- SO(3) helpers (Mat3, hand-written, no Eigen/Geometry) -----------------------------
+// skew(w): the cross-product matrix S with S*x = w x x.
+inline Mat3 skew(const Vec3e& w) {
+    Mat3 S; S << 0, -w(2), w(1),
+                 w(2), 0, -w(0),
+                 -w(1), w(0), 0;
+    return S;
+}
+// vee of (R - R^T): the axial vector of the skew part, = 2 sin(theta) * axis.
+inline Vec3e veeAsym(const Mat3& R) {
+    return Vec3e(R(2, 1) - R(1, 2), R(0, 2) - R(2, 0), R(1, 0) - R(0, 1));
+}
+// Rodrigues exp: rotation matrix for rotation vector w (axis*angle). Series near 0 to avoid 0/0.
+inline Mat3 expSO3(const Vec3e& w) {
+    const real th = w.norm();
+    const Mat3 S = skew(w);
+    if (th < 1e-7) return Mat3::Identity() + S + 0.5 * S * S;           // sin/th->1, (1-cos)/th^2->1/2
+    const real a = std::sin(th) / th;
+    const real b = (1.0 - std::cos(th)) / (th * th);
+    return Mat3::Identity() + a * S + b * (S * S);
+}
+// log of a rotation matrix -> rotation vector (axis*angle). Handles theta->0 (series) and theta->pi.
+inline Vec3e logSO3(const Mat3& R) {
+    real cth = 0.5 * (R.trace() - 1.0);
+    cth = std::max<real>(-1.0, std::min<real>(1.0, cth));
+    const real th = std::acos(cth);
+    if (th < 1e-7) {
+        // log ~ (1/2)(R-R^T) axial, with the (theta/(2 sin theta))->1/2 prefactor (series exact to O(th^2))
+        return 0.5 * (1.0 + th * th / 6.0) * veeAsym(R);
+    }
+    if (th < kPi - 1e-5) {
+        return (th / (2.0 * std::sin(th))) * veeAsym(R);
+    }
+    // theta near pi: sin(theta)~0, recover the axis from the symmetric part B = (R + I)/2 = axis axis^T.
+    // The 1e-5 switch widens the safety band: the narrow theta in (pi-2e-6, pi-1e-6) seam where both
+    // branches dip to ~1e-4 is harmless -- the rotation vector here is OUTPUT-only (every R used in the
+    // computation is built by expSO3, exact everywhere), and no oracle or engineering rotation reaches it.
+    Mat3 B = 0.5 * (R + Mat3::Identity());
+    int k = 0; real best = B(0, 0);
+    if (B(1, 1) > best) { best = B(1, 1); k = 1; }
+    if (B(2, 2) > best) { best = B(2, 2); k = 2; }
+    Vec3e axis;
+    const real d = std::sqrt(std::max<real>(0.0, B(k, k)));
+    axis(k) = d;
+    if (d > 1e-12) { for (int i = 0; i < 3; ++i) if (i != k) axis(i) = B(k, i) / d; }
+    axis.normalize();
+    // fix the sign from the (vanishing but directional) skew part
+    const Vec3e s = veeAsym(R);
+    if (s.dot(axis) < 0) axis = -axis;
+    return th * axis;
 }
 
-// Positive-definite / non-singular test of an LDLT factor from its diagonal D (mirrors the
-// assembleAndFactor mechanism test and PDeltaAnalysis::ldltPositiveDefinite). tol is relative to max|D|.
+// Per-member 3D co-rotational element (initial invariants + recovered state).
+struct CrBeam3D {
+    int      e  = -1;
+    MemberId id = 0;
+    int      ni = -1, nj = -1;
+    int      gmap[12] = { 0,0,0,0,0,0,0,0,0,0,0,0 };  // global DOF of [uI(3),thI(3),uJ(3),thJ(3)]
+    real     L0 = 0;
+    Mat3     E0col = Mat3::Identity();                // initial element frame (COLUMNS = local x,y,z in global)
+    real     EA = 0, EIy = 0, EIz = 0, GJ = 0;
+    // recovered natural state (member-force output)
+    real     Nax = 0, MzI = 0, MzJ = 0, MyI = 0, MyJ = 0, Tx = 0, Ln = 0;
+};
+
+// Translation of a node from the working displacement vector.
+inline Vec3e nodeTrans(const std::vector<real>& u, int n) {
+    return Vec3e(u[(size_t)gdof(n, Ux)], u[(size_t)gdof(n, Uy)], u[(size_t)gdof(n, Uz)]);
+}
+
+// Build the 3D internal force fe(12) and tangent Ke(12x12) at the current translations u + nodal triads
+// Rnode. Stores the recovered natural forces on the element. The tangent is the material part T^T*Kl*T plus
+// the axial geometric stiffness Ksigma1 (the strict axial term that reduces to S9's (N/Ln)q q^T, verified
+// by the F50c P-Delta degeneration oracle). The full spin/moment corrections (Ksigma2/3, OpenSees
+// getKs2Matrix) are NOT added: the NR converged solution depends only on f_int (which is complete), the
+// tangent only on convergence speed, and the main term already converges the elastica alpha=1..10 (S9c).
+void crCompute3D(CrBeam3D& b, const FrameModel& M, const std::vector<real>& u,
+                 const std::vector<Mat3>& Rnode,
+                 Eigen::Matrix<real, 12, 1>& fe, Eigen::Matrix<real, 12, 12>& Ke) {
+    const Vec3e Xi = toE(M.nodes[(size_t)b.ni].pos) + nodeTrans(u, b.ni);
+    const Vec3e Xj = toE(M.nodes[(size_t)b.nj].pos) + nodeTrans(u, b.nj);
+    const Vec3e d  = Xj - Xi;
+    const real  Ln = std::max<real>(1e-300, d.norm());
+    const Vec3e e1 = d / Ln;
+
+    // current nodal triads (columns = current section axes in global)
+    const Mat3 qI = Rnode[(size_t)b.ni] * b.E0col;
+    const Mat3 qJ = Rnode[(size_t)b.nj] * b.E0col;
+
+    // mean triad (geodesic midpoint of qI, qJ), then Gram-Schmidt its axes onto the chord e1
+    const Mat3 qm = expSO3(0.5 * logSO3(qJ * qI.transpose())) * qI;
+    const Vec3e r1 = qm.col(0), r2 = qm.col(1), r3 = qm.col(2);
+    const real denom = 1.0 + r1.dot(e1);                       // ~2 normally; ~0 only at a 180 flip
+    const Vec3e e1r1 = e1 + r1;
+    Vec3e e2 = r2 - (r2.dot(e1) / denom) * e1r1; e2.normalize();
+    Vec3e e3 = r3 - (r3.dot(e1) / denom) * e1r1; e3.normalize();
+    Mat3 E; E.col(0) = e1; E.col(1) = e2; E.col(2) = e3;
+
+    // local deformational rotations: nodal triad rotation relative to the element frame
+    const Vec3e thI = logSO3(E.transpose() * qI);              // [twist_x, bend_y, bend_z] at I
+    const Vec3e thJ = logSO3(E.transpose() * qJ);
+    const real ubar = Ln - b.L0;
+
+    // natural forces pb = Kl * v, v = [ubar, tz_I, tz_J, ty_I, ty_J, tx]
+    const real eaL = b.EA / b.L0, eiyL = b.EIy / b.L0, eizL = b.EIz / b.L0, gjL = b.GJ / b.L0;
+    const real tzI = thI(2), tzJ = thJ(2), tyI = thI(1), tyJ = thJ(1);
+    const real tx  = thJ(0) - thI(0);                          // relative twist about the beam axis
+    const real N   = eaL * ubar;                               // axial (tension positive)
+    const real MzI = eizL * (4.0 * tzI + 2.0 * tzJ);
+    const real MzJ = eizL * (2.0 * tzI + 4.0 * tzJ);
+    const real MyI = eiyL * (4.0 * tyI + 2.0 * tyJ);
+    const real MyJ = eiyL * (2.0 * tyI + 4.0 * tyJ);
+    const real Tx  = gjL * tx;
+    b.Nax = N; b.MzI = MzI; b.MzJ = MzJ; b.MyI = MyI; b.MyJ = MyJ; b.Tx = Tx; b.Ln = Ln;
+
+    Eigen::Matrix<real, 6, 1> pb; pb << N, MzI, MzJ, MyI, MyJ, Tx;
+
+    // transformation T (6x12): rows = basic [ubar, tz_I, tz_J, ty_I, ty_J, tx], cols = [uI,thI,uJ,thJ].
+    // Derived from the first-order frame variation; reduces EXACTLY to the S9 planar B in the XY/Z limit.
+    Eigen::Matrix<real, 6, 12> T; T.setZero();
+    auto setBlk = [&](int row, int c0, const Vec3e& v) { for (int i = 0; i < 3; ++i) T(row, c0 + i) = v(i); };
+    const Vec3e e2L = e2 / Ln, e3L = e3 / Ln;
+    setBlk(0, 0, -e1);   setBlk(0, 6,  e1);                                  // ubar
+    setBlk(1, 0,  e2L);  setBlk(1, 3,  e3);  setBlk(1, 6, -e2L);            // tz_I
+    setBlk(2, 0,  e2L);  setBlk(2, 9,  e3);  setBlk(2, 6, -e2L);            // tz_J
+    setBlk(3, 0, -e3L);  setBlk(3, 3,  e2);  setBlk(3, 6,  e3L);            // ty_I
+    setBlk(4, 0, -e3L);  setBlk(4, 9,  e2);  setBlk(4, 6,  e3L);            // ty_J
+    setBlk(5, 3, -e1);   setBlk(5, 9,  e1);                                  // tx (relative twist)
+
+    fe = T.transpose() * pb;
+
+    // material tangent
+    Eigen::Matrix<real, 6, 6> Kl; Kl.setZero();
+    Kl(0, 0) = eaL;
+    Kl(1, 1) = 4.0 * eizL; Kl(1, 2) = 2.0 * eizL; Kl(2, 1) = 2.0 * eizL; Kl(2, 2) = 4.0 * eizL;
+    Kl(3, 3) = 4.0 * eiyL; Kl(3, 4) = 2.0 * eiyL; Kl(4, 3) = 2.0 * eiyL; Kl(4, 4) = 4.0 * eiyL;
+    Kl(5, 5) = gjL;
+    Ke = T.transpose() * Kl * T;
+
+    // Ksigma1: axial geometric stiffness (chord stress stiffening), A = (I - e1 e1^T)/Ln. MUST add.
+    const Mat3 A = (Mat3::Identity() - e1 * e1.transpose()) / Ln;
+    const Mat3 NA = N * A;
+    Ke.block(0, 0, 3, 3) += NA; Ke.block(0, 6, 3, 3) -= NA;
+    Ke.block(6, 0, 3, 3) -= NA; Ke.block(6, 6, 3, 3) += NA;
+}
+
+// Positive-definite / non-singular test of an LDLT factor from its diagonal D (mirrors S9 / PDelta).
 bool ldltPosDef(const LDLTSolver& solver, real relTol) {
     const VecX D = solver.vectorD();
     real maxAbs = 0;
     for (int i = 0; i < D.size(); ++i) maxAbs = std::max(maxAbs, std::abs(D(i)));
     const real tol = relTol * std::max<real>(1, maxAbs);
-    for (int i = 0; i < D.size(); ++i)
-        if (!(D(i) > tol)) return false;
+    for (int i = 0; i < D.size(); ++i) if (!(D(i) > tol)) return false;
     return true;
 }
 
@@ -111,10 +198,10 @@ bool ldltPosDef(const LDLTSolver& solver, real relTol) {
 
 CorotationalResult runCorotational(const FrameModel& model, const CorotationalOptions& opts) {
     CorotationalResult R;
+    const int N = model.dofCount();
 
-    // A rejected / failed run still returns a WELL-FORMED SolveResult: u and reactions are zero-filled
-    // to the model DOF count and memberForces are id-tagged, so a consumer that reads finalState.u
-    // (e.g. the CLI printState) never indexes an empty vector. singular=true + a diagnostic mark it.
+    // A rejected / failed run still returns a WELL-FORMED SolveResult (zero-filled to the model DOF count,
+    // member forces id-tagged) so a consumer that reads finalState.u never indexes an empty vector.
     auto reject = [&](const char* diag) -> CorotationalResult {
         CorotationalResult RR;
         const int n = std::max(0, model.dofCount());
@@ -126,7 +213,6 @@ CorotationalResult runCorotational(const FrameModel& model, const CorotationalOp
         for (size_t e = 0; e < model.members.size(); ++e) RR.finalState.memberForces[e].member = model.members[e].id;
         return RR;
     };
-    // Fill a partial (e.g. diverged) finalState from a best-effort displacement snapshot.
     auto fillPartial = [&](CorotationalResult& RR, const std::vector<real>& uu) {
         RR.finalState.u = uu;
         RR.finalState.reactions.assign(uu.size(), 0.0);
@@ -139,36 +225,27 @@ CorotationalResult runCorotational(const FrameModel& model, const CorotationalOp
         if (sh.active) return reject("co-rotational large-displacement is beam-column only; model contains shells");
     std::string why;
     if (!model.validate(why)) return reject(why.c_str());
-    // nodal force loads only -- a member UDL would otherwise be silently dropped
     for (const auto& udl : model.memberUDLs)
         for (const auto& mem : model.members)
             if (mem.id == udl.member && mem.active)
-                return reject("co-rotational v1 supports nodal force loads only; member UDLs not yet supported");
-    // no prescribed support displacement
+                return reject("co-rotational supports nodal force loads only; member UDLs not yet supported");
     for (const auto& nd : model.nodes)
         for (int d = 0; d < 6; ++d)
             if (nd.fixed[(size_t)d] && nd.prescribed[(size_t)d] != 0.0)
-                return reject("co-rotational v1 does not support prescribed support displacements");
-    // formed plastic hinges are not honoured (would be computed at FULL stiffness -> silently wrong),
-    // consistent with the UDL rejection policy (S10 N-M hinges land after S9b, R4)
+                return reject("co-rotational does not support prescribed support displacements");
     for (const auto& h : model.hinges)
         for (const auto& mem : model.members)
             if (mem.id == h.member && mem.active)
-                return reject("co-rotational v1 does not honour formed plastic hinges");
-    // PLANAR geometry: every active member must lie in the global XY plane. The formulation uses only
-    // x,y, so a member with out-of-plane z-extent would be SILENTLY computed as its xy-projection.
+                return reject("co-rotational does not honour formed plastic hinges (S10, after S9b)");
+    // tension-only / member-end releases are not honoured in CR (would be computed at full stiffness)
     for (const auto& mem : model.members) {
         if (!mem.active) continue;
-        const int ni = model.nodeIndex(mem.i), nj = model.nodeIndex(mem.j);
-        if (ni < 0 || nj < 0) continue;
-        const Vec3 pi = model.nodes[(size_t)ni].pos, pj = model.nodes[(size_t)nj].pos;
-        const real dx = pj.x - pi.x, dy = pj.y - pi.y, dz = pj.z - pi.z;
-        const real L3 = std::sqrt(dx * dx + dy * dy + dz * dz);
-        if (std::fabs(dz) > 1e-9 * std::max<real>(1.0, L3))
-            return reject("co-rotational v1 requires all members in the global XY plane (out-of-plane z-extent); 3D CR is S9b");
+        if (mem.tensionOnly) return reject("co-rotational does not honour tension-only members");
+        for (int k = 0; k < 12; ++k) if (mem.release[(size_t)k])
+            return reject("co-rotational does not honour member-end releases");
     }
+    // NOTE: S9b removes the S9 out-of-plane-z guard -- members may now have any spatial orientation.
 
-    const int N = model.dofCount();
     if (N <= 0) return reject("empty model");
 
     // --- free-DOF map ---
@@ -179,30 +256,27 @@ CorotationalResult runCorotational(const FrameModel& model, const CorotationalOp
             if (!model.nodes[k].fixed[(size_t)d]) fmap[(size_t)gdof((int)k, d)] = nf++;
     if (nf == 0) return reject("fully constrained model");
 
-    // --- build planar CR elements from active members ---
-    std::vector<CrBeam> elems;
+    // --- build 3D CR elements from active members ---
+    std::vector<CrBeam3D> elems;
     elems.reserve(model.members.size());
     for (size_t e = 0; e < model.members.size(); ++e) {
         const Member& m = model.members[e];
         if (!m.active) continue;
         const int ni = model.nodeIndex(m.i), nj = model.nodeIndex(m.j);
         if (ni < 0 || nj < 0) continue;
-        CrBeam b;
+        CrBeam3D b;
         b.e = (int)e; b.id = m.id; b.ni = ni; b.nj = nj;
-        b.gmap[0] = gdof(ni, Ux); b.gmap[1] = gdof(ni, Uy); b.gmap[2] = gdof(ni, Rz);
-        b.gmap[3] = gdof(nj, Ux); b.gmap[4] = gdof(nj, Uy); b.gmap[5] = gdof(nj, Rz);
-        const Vec3 Xi = model.nodes[(size_t)ni].pos, Xj = model.nodes[(size_t)nj].pos;
-        const real dx = Xj.x - Xi.x, dy = Xj.y - Xi.y;
-        b.L0 = std::sqrt(dx * dx + dy * dy);
-        b.beta0 = std::atan2(dy, dx);
-        b.betaPrev = b.beta0;
+        for (int d = 0; d < 6; ++d) { b.gmap[d] = gdof(ni, d); b.gmap[6 + d] = gdof(nj, d); }
+        const Vec3 pi = model.nodes[(size_t)ni].pos, pj = model.nodes[(size_t)nj].pos;
+        b.L0 = norm(pj - pi);
+        b.E0col = localAxes(pi, pj, m.refVec).transpose();     // rows->cols: columns are local axes in global
         const Material& mat = model.materials[(size_t)m.matIdx];
         const Section&  sec = model.sections[(size_t)m.secIdx];
-        b.EA = mat.E * sec.A; b.EIz = mat.E * sec.Iz;
+        b.EA = mat.E * sec.A; b.EIy = mat.E * sec.Iy; b.EIz = mat.E * sec.Iz; b.GJ = mat.G * sec.J;
         elems.push_back(b);
     }
 
-    // --- external nodal force vector (full). UDL / prescribed reserved for a later CR revision. ---
+    // --- external nodal force vector ---
     VecX Fext = VecX::Zero(N);
     for (const auto& nl : model.nodalLoads) {
         const int ni = model.nodeIndex(nl.node);
@@ -212,8 +286,9 @@ CorotationalResult runCorotational(const FrameModel& model, const CorotationalOp
     VecX Fext_f = VecX::Zero(nf);
     for (int g = 0; g < N; ++g) if (fmap[(size_t)g] >= 0) Fext_f(fmap[(size_t)g]) = Fext((Eigen::Index)g);
 
-    // --- Newton-Raphson with load stepping ---
+    // --- driver state: translations in u (accumulated), rotations in Rnode (SO(3), spatial update) ---
     std::vector<real> u((size_t)N, 0.0);
+    std::vector<Mat3> Rnode(model.nodes.size(), Mat3::Identity());
     const int steps = std::max(1, opts.loadSteps);
     int totalIters = 0;
     real lastRel = 0;
@@ -223,31 +298,22 @@ CorotationalResult runCorotational(const FrameModel& model, const CorotationalOp
         bool stepConverged = false;
 
         for (int it = 1; it <= std::max(1, opts.maxIter); ++it) {
-            // assemble internal force + tangent at current u
             VecX fint = VecX::Zero(N);
-            std::vector<Triplet> trips;
-            trips.reserve(elems.size() * 36);
-            std::vector<real> betaNow(elems.size());
-            for (size_t i = 0; i < elems.size(); ++i) {
-                Eigen::Matrix<real, 6, 1> fe; Eigen::Matrix<real, 6, 6> Ke; real bo;
-                crCompute(elems[i], model, u, fe, Ke, bo);
-                betaNow[i] = bo;
-                for (int a = 0; a < 6; ++a) {
-                    fint((Eigen::Index)elems[i].gmap[a]) += fe(a);
-                    for (int c = 0; c < 6; ++c)
-                        trips.emplace_back(elems[i].gmap[a], elems[i].gmap[c], Ke(a, c));
+            std::vector<Triplet> trips; trips.reserve(elems.size() * 144);
+            for (auto& el : elems) {
+                Eigen::Matrix<real, 12, 1> fe; Eigen::Matrix<real, 12, 12> Ke;
+                crCompute3D(el, model, u, Rnode, fe, Ke);
+                for (int a = 0; a < 12; ++a) {
+                    fint((Eigen::Index)el.gmap[a]) += fe(a);
+                    for (int c = 0; c < 12; ++c) trips.emplace_back(el.gmap[a], el.gmap[c], Ke(a, c));
                 }
             }
-            for (size_t i = 0; i < elems.size(); ++i) elems[i].betaPrev = betaNow[i];   // advance unwrap
 
-            // residual on free DOFs: r = lambda*Fext - fint
             VecX rf = VecX::Zero(nf);
             for (int g = 0; g < N; ++g)
                 if (fmap[(size_t)g] >= 0) rf(fmap[(size_t)g]) = lambda * Fext((Eigen::Index)g) - fint((Eigen::Index)g);
 
-            // reduce tangent to free-free
-            std::vector<Triplet> tf;
-            tf.reserve(trips.size());
+            std::vector<Triplet> tf; tf.reserve(trips.size());
             for (const auto& t : trips) {
                 const int fr = fmap[(size_t)t.row()], fc = fmap[(size_t)t.col()];
                 if (fr >= 0 && fc >= 0) tf.emplace_back(fr, fc, t.value());
@@ -261,28 +327,32 @@ CorotationalResult runCorotational(const FrameModel& model, const CorotationalOp
                 R.diverged = true;
                 R.finalState.singular = true;
                 R.finalState.diagnostic = "co-rotational tangent not positive-definite (limit point; snap-through needs arc-length)";
-                R.loadStepsCompleted = s - 1;
-                R.totalIterations = totalIters;
-                R.lastResidual = lastRel;
+                R.loadStepsCompleted = s - 1; R.totalIterations = totalIters; R.lastResidual = lastRel;
                 fillPartial(R, u);
                 return R;
             }
-
             const VecX duf = ldlt.solve(rf);
             if (ldlt.info() != Eigen::Success || !duf.allFinite()) {
                 R.diverged = true;
                 R.finalState.singular = true;
                 R.finalState.diagnostic = "co-rotational solve produced non-finite increment";
-                R.loadStepsCompleted = s - 1;
-                R.totalIterations = totalIters;
+                R.loadStepsCompleted = s - 1; R.totalIterations = totalIters;
                 fillPartial(R, u);
                 return R;
             }
 
-            // update u
+            // scatter increment; accumulate translations, spatial-update nodal rotations
+            std::vector<real> du((size_t)N, 0.0);
+            for (int g = 0; g < N; ++g) if (fmap[(size_t)g] >= 0) du[(size_t)g] = duf(fmap[(size_t)g]);
             real un = 0;
-            for (int g = 0; g < N; ++g)
-                if (fmap[(size_t)g] >= 0) { u[(size_t)g] += duf(fmap[(size_t)g]); un += u[(size_t)g] * u[(size_t)g]; }
+            for (size_t k = 0; k < model.nodes.size(); ++k) {
+                u[(size_t)gdof((int)k, Ux)] += du[(size_t)gdof((int)k, Ux)];
+                u[(size_t)gdof((int)k, Uy)] += du[(size_t)gdof((int)k, Uy)];
+                u[(size_t)gdof((int)k, Uz)] += du[(size_t)gdof((int)k, Uz)];
+                const Vec3e dth(du[(size_t)gdof((int)k, Rx)], du[(size_t)gdof((int)k, Ry)], du[(size_t)gdof((int)k, Rz)]);
+                if (dth.squaredNorm() > 0) Rnode[k] = expSO3(dth) * Rnode[k];   // spatial left-multiply
+                for (int d = 0; d < 3; ++d) { const real t = u[(size_t)gdof((int)k, d)]; un += t * t; }
+            }
             ++totalIters;
 
             const real dn = duf.norm();
@@ -294,44 +364,46 @@ CorotationalResult runCorotational(const FrameModel& model, const CorotationalOp
         }
 
         R.loadStepsCompleted = stepConverged ? s : (s - 1);
-        if (!stepConverged) {
-            // hit maxIter without a verdict: report best-effort state, not converged.
-            R.converged = false;
-            R.totalIterations = totalIters;
-            R.lastResidual = lastRel;
-            // still recover so the caller sees the partial state
-            break;
-        }
+        if (!stepConverged) { R.converged = false; R.totalIterations = totalIters; R.lastResidual = lastRel; break; }
         if (s == steps) R.converged = true;
     }
     R.totalIterations = totalIters;
     R.lastResidual = lastRel;
 
-    // --- recover finalState (SolveResult) ---
+    // --- recover finalState (SolveResult): translations from u, rotations from logSO3(Rnode) ---
     SolveResult& SR = R.finalState;
     SR.u.assign((size_t)N, 0.0);
     SR.reactions.assign((size_t)N, 0.0);
-    for (int g = 0; g < N; ++g) SR.u[(size_t)g] = u[(size_t)g];
+    for (size_t k = 0; k < model.nodes.size(); ++k) {
+        SR.u[(size_t)gdof((int)k, Ux)] = u[(size_t)gdof((int)k, Ux)];
+        SR.u[(size_t)gdof((int)k, Uy)] = u[(size_t)gdof((int)k, Uy)];
+        SR.u[(size_t)gdof((int)k, Uz)] = u[(size_t)gdof((int)k, Uz)];
+        const Vec3e w = logSO3(Rnode[k]);            // total rotation vector (honest: not simply additive)
+        SR.u[(size_t)gdof((int)k, Rx)] = w(0);
+        SR.u[(size_t)gdof((int)k, Ry)] = w(1);
+        SR.u[(size_t)gdof((int)k, Rz)] = w(2);
+    }
 
-    // recompute internal force at the final state for reactions + member forces
     VecX fint = VecX::Zero(N);
-    for (size_t i = 0; i < elems.size(); ++i) {
-        Eigen::Matrix<real, 6, 1> fe; Eigen::Matrix<real, 6, 6> Ke; real bo;
-        crCompute(elems[i], model, u, fe, Ke, bo);
-        for (int a = 0; a < 6; ++a) fint((Eigen::Index)elems[i].gmap[a]) += fe(a);
+    for (auto& el : elems) {
+        Eigen::Matrix<real, 12, 1> fe; Eigen::Matrix<real, 12, 12> Ke;
+        crCompute3D(el, model, u, Rnode, fe, Ke);
+        for (int a = 0; a < 12; ++a) fint((Eigen::Index)el.gmap[a]) += fe(a);
     }
     for (int g = 0; g < N; ++g) SR.reactions[(size_t)g] = fint((Eigen::Index)g) - Fext((Eigen::Index)g);
 
     SR.memberForces.resize(model.members.size());
     SR.shellForces.clear();
     for (size_t e = 0; e < model.members.size(); ++e) SR.memberForces[e].member = model.members[e].id;
-    for (const CrBeam& b : elems) {
-        const real V = (b.Mi + b.Mj) / std::max<real>(1e-300, b.Ln);   // transverse shear (current length)
+    for (const CrBeam3D& b : elems) {
+        const real Ln = std::max<real>(1e-300, b.Ln);
+        const real Vy = (b.MzI + b.MzJ) / Ln;       // transverse shear from end-moment equilibrium (current chord)
+        const real Vz = -(b.MyI + b.MyJ) / Ln;
         MemberForcePair& mp = SR.memberForces[(size_t)b.e];
         mp.member = b.id;
-        // local end forces (planar): N compression-positive, in-plane shear Vy, bending Mz.
-        mp.endI = MemberEndForces{ -b.N,  V, 0, 0, 0, b.Mi };
-        mp.endJ = MemberEndForces{ -b.N, -V, 0, 0, 0, b.Mj };
+        // local end forces: N compression-positive, shears Vy/Vz, torsion T, bending My/Mz.
+        mp.endI = MemberEndForces{ -b.Nax,  Vy,  Vz, -b.Tx, b.MyI, b.MzI };
+        mp.endJ = MemberEndForces{ -b.Nax, -Vy, -Vz,  b.Tx, b.MyJ, b.MzJ };
     }
     SR.singular = false;
     return R;

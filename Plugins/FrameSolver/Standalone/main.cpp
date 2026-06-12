@@ -2618,6 +2618,114 @@ int main() {
         }
     }
 
+    // ---------- F51: 3D GENERAL co-rotational (arbitrary axis, torsion, biaxial bending) ----------
+    {
+        std::printf("[F51] 3D co-rotational: arbitrary-axis invariance / spatial elastica / torsion+biaxial\n");
+        const real L = 1.0, Em = 1.0, Gm = 0.4, Im = 1e-3;
+        Material cmat(Em, Gm, 0.0);
+        // symmetric slender section (Iy=Iz) so bending is isotropic (elastica/invariance)
+        Section sym; sym.A = 100.0; sym.Iy = 1e-3; sym.Iz = 1e-3; sym.J = 2e-3;
+        sym.cy = 1.0; sym.cz = 1.0; sym.Asy = 0.0; sym.Asz = 0.0;
+
+        // (a) ARBITRARY-AXIS rotational invariance (machine precision): solve an X-cantilever, then solve the
+        //     SAME problem rigidly rotated by R_g(axis,phi). |u_tip| must be identical (CR frame indifference;
+        //     exercises expSO3/logSO3/frame E with all three e-axes non-trivial).
+        {
+            auto rotv = [](Vec3 v, Vec3 k, real ang) -> Vec3 {
+                const real nk = std::sqrt(k.x * k.x + k.y * k.y + k.z * k.z); k = Vec3(k.x / nk, k.y / nk, k.z / nk);
+                const real c = std::cos(ang), s = std::sin(ang), kd = k.x * v.x + k.y * v.y + k.z * v.z;
+                const Vec3 kxv(k.y * v.z - k.z * v.y, k.z * v.x - k.x * v.z, k.x * v.y - k.y * v.x);
+                return Vec3(v.x * c + kxv.x * s + k.x * kd * (1 - c), v.y * c + kxv.y * s + k.y * kd * (1 - c), v.z * c + kxv.z * s + k.z * kd * (1 - c));
+            };
+            const real alpha = 5.0, P = alpha * Em * Im / (L * L);
+            FrameModel m0; fixtures::cantileverSpatial(m0, 12, L, Vec3(1, 0, 0), 0, P, 0, 0, 0, 0, cmat, sym);
+            CorotationalOptions co; co.loadSteps = 15; co.maxIter = 80;
+            const CorotationalResult R0 = runCorotational(m0, co);
+            const Vec3 axisN(1, 1, 1); const real phi = 2.0;
+            FrameModel m1; fixtures::cantileverSpatial(m1, 12, L, Vec3(1, 0, 0), 0, P, 0, 0, 0, 0, cmat, sym);
+            for (auto& nd : m1.nodes) nd.pos = rotv(nd.pos, axisN, phi);
+            for (auto& mm : m1.members) mm.refVec = rotv(mm.refVec, axisN, phi);
+            const Vec3 fr = rotv(Vec3(0, P, 0), axisN, phi);
+            m1.nodalLoads[0].comp[Ux] = fr.x; m1.nodalLoads[0].comp[Uy] = fr.y; m1.nodalLoads[0].comp[Uz] = fr.z;
+            const CorotationalResult R1 = runCorotational(m1, co);
+            auto mag = [&](const CorotationalResult& R) { const real ux = R.finalState.u[(size_t)gdof(12, Ux)], uy = R.finalState.u[(size_t)gdof(12, Uy)], uz = R.finalState.u[(size_t)gdof(12, Uz)]; return std::sqrt(ux * ux + uy * uy + uz * uz); };
+            const real a = mag(R0), b = mag(R1);
+            std::printf("   (a) arbitrary-axis invariance |u_tip| base=%.6g rot=%.6g rel=%.2e\n", a, b, relErr(b, a));
+            checkTrue("F51a converged", R0.converged && R1.converged, R0.finalState.diagnostic + R1.finalState.diagnostic);
+            checkClose("F51a arbitrary-axis rotational invariance", b, a, 1e-9);
+        }
+
+        // (b) SPATIAL elastica: cantilever along a TILTED axis (1,1,1), symmetric section, tip load
+        //     perpendicular to the axis -> delta_v/L, delta_h/L vs Mattiasson table.
+        {
+            struct Row { real alpha, dv, dh; };
+            const Row tab[] = { {1.0, 0.3017207738, 0.0564332363}, {5.0, 0.7137915236, 0.3876283607}, {10.0, 0.8106090249, 0.5549955978} };
+            const real na = std::sqrt(3.0); const Vec3 axis(1, 1, 1), aN(1 / na, 1 / na, 1 / na);
+            const real n2 = std::sqrt(2.0); const Vec3 wN(1 / n2, -1 / n2, 0.0);   // perpendicular to aN
+            for (const Row& r : tab) {
+                const real P = r.alpha * Em * Im / (L * L);
+                FrameModel m; fixtures::cantileverSpatial(m, 16, L, axis, wN.x * P, wN.y * P, wN.z * P, 0, 0, 0, cmat, sym);
+                CorotationalOptions co; co.loadSteps = std::max(12, (int)(r.alpha * 3)); co.maxIter = 80;
+                const CorotationalResult R = runCorotational(m, co);
+                const Vec3 ut(R.finalState.u[(size_t)gdof(16, Ux)], R.finalState.u[(size_t)gdof(16, Uy)], R.finalState.u[(size_t)gdof(16, Uz)]);
+                const real dv = (ut.x * wN.x + ut.y * wN.y + ut.z * wN.z) / L;
+                const real dh = -(ut.x * aN.x + ut.y * aN.y + ut.z * aN.z) / L;
+                std::printf("   (b) spatial elastica alpha=%2.0f dv/L=%.6f(exp %.6f) dh/L=%.6f(exp %.6f)\n", r.alpha, dv, r.dv, dh, r.dh);
+                checkTrue(("F51b converged alpha=" + std::to_string((int)r.alpha)).c_str(), R.converged, R.finalState.diagnostic);
+                checkClose(("F51b spatial dv/L alpha=" + std::to_string((int)r.alpha)).c_str(), dv, r.dv, 2e-3);
+                checkClose(("F51b spatial dh/L alpha=" + std::to_string((int)r.alpha)).c_str(), dh, r.dh, 6e-3);
+            }
+        }
+
+        // (c) PURE TORSION: X-cantilever, small tip torque T -> tip twist theta_x = T L/(G J) (linear).
+        {
+            Section asec; asec.A = 100.0; asec.Iy = 2e-3; asec.Iz = 1e-3; asec.J = 1.5e-3; asec.cy = 1.0; asec.cz = 1.0; asec.Asy = 0.0; asec.Asz = 0.0;
+            const real T = 1e-6;
+            FrameModel m; fixtures::cantileverSpatial(m, 8, L, Vec3(1, 0, 0), 0, 0, 0, T, 0, 0, cmat, asec);
+            CorotationalOptions co; co.loadSteps = 1; co.maxIter = 50;
+            const CorotationalResult R = runCorotational(m, co);
+            const real tw = R.finalState.u[(size_t)gdof(8, Rx)], exact = T * L / (Gm * asec.J);
+            std::printf("   (c) pure torsion theta_x=%.6e exact=%.6e rel=%.2e\n", tw, exact, relErr(tw, exact));
+            checkTrue("F51c torsion converged", R.converged, R.finalState.diagnostic);
+            checkClose("F51c pure torsion theta=TL/GJ", tw, exact, 1e-6);
+        }
+
+        // (d) BIAXIAL bending separation: X-cantilever, small tip Fy,Fz (asymmetric Iy!=Iz) ->
+        //     delta_y = Fy L^3/(3 E Iz), delta_z = Fz L^3/(3 E Iy). Verifies the two planes stay distinct.
+        {
+            Section asec; asec.A = 100.0; asec.Iy = 2e-3; asec.Iz = 1e-3; asec.J = 1.5e-3; asec.cy = 1.0; asec.cz = 1.0; asec.Asy = 0.0; asec.Asz = 0.0;
+            const real Fy = 1e-7, Fz = 1e-7;
+            FrameModel m; fixtures::cantileverSpatial(m, 8, L, Vec3(1, 0, 0), 0, Fy, Fz, 0, 0, 0, cmat, asec);
+            CorotationalOptions co; co.loadSteps = 1; co.maxIter = 50;
+            const CorotationalResult R = runCorotational(m, co);
+            const real dy = R.finalState.u[(size_t)gdof(8, Uy)], dz = R.finalState.u[(size_t)gdof(8, Uz)];
+            // localAxes(X-axis, refVec=+Z): local y = +Z_global, local z = -Y_global. So a global-Y tip force
+            // bends about local y (uses Iy); a global-Z tip force bends about local z (uses Iz).
+            const real ey = Fy * L * L * L / (3 * Em * asec.Iy), ez = Fz * L * L * L / (3 * Em * asec.Iz);
+            std::printf("   (d) biaxial dy=%.6e(exp %.6e) dz=%.6e(exp %.6e)\n", dy, ey, dz, ez);
+            checkTrue("F51d biaxial converged", R.converged, R.finalState.diagnostic);
+            checkClose("F51d biaxial dy=FyL^3/3EIy", dy, ey, 1e-6);
+            checkClose("F51d biaxial dz=FzL^3/3EIz", dz, ez, 1e-6);
+        }
+
+        // (e) LARGE-ANGLE pure torsion: single element, tip torque drives the section twist to ~0.9 pi
+        //     (~162 deg) -> exercises logSO3 at its large-angle end (general branch, sin(theta) far from 0)
+        //     and the GJ channel + spatial R_node update at a FINITE rotation (vs the small-angle F51c).
+        //     Torsion is geometrically linear (twist about the unchanged chord), so theta_x = T L/(G J).
+        {
+            const real kPiL = 3.14159265358979323846;
+            Section tsec; tsec.A = 100.0; tsec.Iy = 2e-3; tsec.Iz = 1e-3; tsec.J = 1.5e-3; tsec.cy = 1.0; tsec.cz = 1.0; tsec.Asy = 0.0; tsec.Asz = 0.0;
+            const real theta = 0.9 * kPiL, T = theta * Gm * tsec.J / L;   // T L/(GJ) = theta
+            FrameModel m; fixtures::cantileverSpatial(m, 1, L, Vec3(1, 0, 0), 0, 0, 0, T, 0, 0, cmat, tsec);
+            CorotationalOptions co; co.loadSteps = 12; co.maxIter = 60;
+            const CorotationalResult R = runCorotational(m, co);
+            const real tw = R.finalState.u[(size_t)gdof(1, Rx)];
+            std::printf("   (e) large-angle torsion theta_x=%.6f exact=%.6f rel=%.2e\n", tw, theta, relErr(tw, theta));
+            checkTrue("F51e large-angle torsion converged", R.converged, R.finalState.diagnostic);
+            checkClose("F51e large-angle pure torsion theta=0.9pi", tw, theta, 1e-9);
+        }
+    }
+
     std::printf("\n%s  (failures=%d)\n", g_fail == 0 ? "ALL PASS" : "FAILURES", g_fail);
     return g_fail == 0 ? 0 : 1;
 }

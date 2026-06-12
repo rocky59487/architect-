@@ -1944,11 +1944,67 @@ void testCorotational() {
         FrameModel m; fixtures::cantileverPlanarTipShearN(m, nq, Lq, Pq, smat, ssec);
         const CorotationalResult R = runCorotational(m, CorotationalOptions{});
         const real Ry  = R.finalState.reactions[(size_t)gdof(0, Uy)];
-        const real m0M = std::fabs(R.finalState.memberForces.empty() ? 0.0 : R.finalState.memberForces[0].endI.Mz);
+        // The S9b 3D driver reports member end forces in the localAxes frame; a +Y tip load on an
+        // X-cantilever (default refVec) bends about local y, so the moment lands in My, not Mz. Read the
+        // frame-invariant transverse bending magnitude sqrt(My^2+Mz^2) rather than a single component.
+        const MemberEndForces e0 = R.finalState.memberForces.empty() ? MemberEndForces{} : R.finalState.memberForces[0].endI;
+        const real m0M = std::sqrt(e0.My * e0.My + e0.Mz * e0.Mz);
         const real eRy = relErr(Ry, -Pq), eM = relErr(m0M, Pq * Lq);
         addRow("Co-rotational", "small-displacement equilibrium (reactions + end-force recovery)",
                "cantilever base reaction Ry=-P (exact statics) and member-0 |Mz|=P*L (small-disp recover)",
                "max rel(Ry+P, |Mz|-PL)", std::max(eRy, eM), 1e-2, R.converged && eRy < 1e-6 && eM < 1e-2);
+    }
+
+    // ---- Check 6 (S9b): 3D arbitrary-axis rigid-rotation frame indifference (exercises SO(3)/frame/T) ----
+    {
+        const real alpha = 5.0, P = alpha * E * I / (L * L);
+        auto rotv = [](Vec3 v, Vec3 k, real ang) -> Vec3 {
+            const real nk = std::sqrt(k.x * k.x + k.y * k.y + k.z * k.z); k = Vec3(k.x / nk, k.y / nk, k.z / nk);
+            const real c = std::cos(ang), s = std::sin(ang), kd = k.x * v.x + k.y * v.y + k.z * v.z;
+            const Vec3 kxv(k.y * v.z - k.z * v.y, k.z * v.x - k.x * v.z, k.x * v.y - k.y * v.x);
+            return Vec3(v.x * c + kxv.x * s + k.x * kd * (1 - c), v.y * c + kxv.y * s + k.y * kd * (1 - c), v.z * c + kxv.z * s + k.z * kd * (1 - c));
+        };
+        CorotationalOptions co; co.loadSteps = 15; co.maxIter = 80;
+        FrameModel m0; fixtures::cantileverSpatial(m0, 12, L, Vec3(1, 0, 0), 0, P, 0, 0, 0, 0, cmat, csec);
+        const CorotationalResult R0 = runCorotational(m0, co);
+        const Vec3 axisN(1, 1, 1); const real phi = 2.0;
+        FrameModel m1; fixtures::cantileverSpatial(m1, 12, L, Vec3(1, 0, 0), 0, P, 0, 0, 0, 0, cmat, csec);
+        for (auto& nd : m1.nodes) nd.pos = rotv(nd.pos, axisN, phi);
+        for (auto& mm : m1.members) mm.refVec = rotv(mm.refVec, axisN, phi);
+        const Vec3 fr = rotv(Vec3(0, P, 0), axisN, phi);
+        m1.nodalLoads[0].comp[Ux] = fr.x; m1.nodalLoads[0].comp[Uy] = fr.y; m1.nodalLoads[0].comp[Uz] = fr.z;
+        const CorotationalResult R1 = runCorotational(m1, co);
+        auto mag = [](const CorotationalResult& R) { const real ux = R.finalState.u[(size_t)gdof(12, Ux)], uy = R.finalState.u[(size_t)gdof(12, Uy)], uz = R.finalState.u[(size_t)gdof(12, Uz)]; return std::sqrt(ux * ux + uy * uy + uz * uz); };
+        const real rel = relErr(mag(R1), mag(R0));
+        addRow("Co-rotational", "3D arbitrary-axis rigid rotation frame indifference",
+               "rotating model+load about an arbitrary (non-Z) axis leaves |u_tip| invariant (expSO3/logSO3/frame E/T)",
+               "rel |u_tip(rotated) - u_tip|", rel, 1e-9, R0.converged && R1.converged && rel < 1e-9);
+    }
+
+    // ---- Check 7 (S9b): pure torsion theta_x = T L/(G J) (GJ channel) ----
+    {
+        Section tsec; tsec.A = 100.0; tsec.Iy = 2e-3; tsec.Iz = 1e-3; tsec.J = 1.5e-3; tsec.cy = 1.0; tsec.cz = 1.0; tsec.Asy = 0.0; tsec.Asz = 0.0;
+        const real T = 1e-6, Gm = 0.4;
+        FrameModel m; fixtures::cantileverSpatial(m, 8, L, Vec3(1, 0, 0), 0, 0, 0, T, 0, 0, cmat, tsec);
+        const CorotationalResult R = runCorotational(m, CorotationalOptions{});
+        const real tw = R.finalState.u[(size_t)gdof(8, Rx)], ex = T * L / (Gm * tsec.J);
+        addRow("Co-rotational", "pure torsion (GJ channel)",
+               "X-cantilever tip twist under a tip torque == T L/(G J) (linear torsion; exercises the GJ natural block)",
+               "rel |theta - TL/GJ|", relErr(tw, ex), 1e-6, R.converged && relErr(tw, ex) < 1e-6);
+    }
+
+    // ---- Check 8 (S9b): biaxial bending separation (Iy vs Iz stay distinct) ----
+    {
+        Section bsec; bsec.A = 100.0; bsec.Iy = 2e-3; bsec.Iz = 1e-3; bsec.J = 1.5e-3; bsec.cy = 1.0; bsec.cz = 1.0; bsec.Asy = 0.0; bsec.Asz = 0.0;
+        const real Fy = 1e-7, Fz = 1e-7;
+        FrameModel m; fixtures::cantileverSpatial(m, 8, L, Vec3(1, 0, 0), 0, Fy, Fz, 0, 0, 0, cmat, bsec);
+        const CorotationalResult R = runCorotational(m, CorotationalOptions{});
+        const real dy = R.finalState.u[(size_t)gdof(8, Uy)], dz = R.finalState.u[(size_t)gdof(8, Uz)];
+        const real ey = Fy * L * L * L / (3 * E * bsec.Iy), ez = Fz * L * L * L / (3 * E * bsec.Iz);  // localAxes: Y->Iy, Z->Iz
+        const real rel = std::max(relErr(dy, ey), relErr(dz, ez));
+        addRow("Co-rotational", "biaxial bending separation (Iy vs Iz)",
+               "global-Y tip force bends about local y (Iy), global-Z about local z (Iz); the two planes stay distinct",
+               "max rel(dy-FyL3/3EIy, dz-FzL3/3EIz)", rel, 1e-3, R.converged && rel < 1e-3);
     }
 }
 

@@ -258,6 +258,29 @@ def main():
           and abs(dv - dv_exact) < 2e-3 and abs(dh - dh_exact) < 5e-3,
           "COROT=%s dv=%.6f(exp %.6f) dh=%.6f(exp %.6f)" % (co, dv, dv_exact, dh, dh_exact))
 
+    # ---- 9: COROT 3D out-of-plane cantilever (S9b) -- X-cantilever, +Z tip load, FULLY 3D (no planar
+    #         restraint), section axes via refVec. Tip dv/L along +Z vs the same Mattiasson elastica. ----
+    def spatial_cantilever_z(n, Lp, Pp, E=1.0, A=100.0, I=1e-3):
+        # symmetric section (Iy=Iz=I) so the out-of-plane elastica matches the planar table.
+        lines = ["MAT {} 0.4 0".format(E), "SEC {} {} {} {} 1 1 0 0".format(A, I, I, 2 * I)]
+        for k in range(n + 1):
+            x = Lp * k / n
+            flags = "1 1 1 1 1 1" if k == 0 else "0 0 0 0 0 0"   # base encastre; rest FULLY free (genuine 3D)
+            lines.append("NODE {} {} 0 0 {} 0 0 0 0 0 0".format(k, x, flags))
+        for k in range(n):
+            lines.append("MEMBER {} {} {} 0 0 0 1 0".format(k, k, k + 1))   # refVec=(0,1,0)
+        lines.append("NLOAD {} 0 0 {} 0 0 0".format(n, Pp))   # +Z tip load (out of the old XY plane)
+        return lines
+
+    alpha3, n3 = 5.0, 16
+    Pp3 = alpha3 * 1.0 * 1e-3 / 1.0 ** 2
+    d3 = run(spatial_cantilever_z(n3, 1.0, Pp3) + ["COROT 20 80 1e-9"])
+    co3 = d3["COROT"]
+    dvz = d3["DISP"][n3][2]   # tip Uz / L (L=1; out-of-plane deflection)
+    check("COROT 3D out-of-plane cantilever alpha=5 (tip dv/L along +Z vs Mattiasson; 3D, no planar restraint)",
+          co3 is not None and co3[0] == 1 and co3[1] == 0 and abs(dvz - dv_exact) < 2e-3,
+          "COROT=%s dvZ=%.6f(exp %.6f)" % (co3, dvz, dv_exact))
+
     print("\n%s  (failures=%d)" % ("ALL PASS" if _fails == 0 else "FAILURES", _fails))
     return 0 if _fails == 0 else 1
 

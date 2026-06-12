@@ -244,6 +244,30 @@ inline void cantileverPlanarTipShearN(FrameModel& m, int n, real L, real P,
     m.nodalLoads = { nl };
 }
 
+// 3D spatial cantilever (S9b co-rotational oracles): n elements of total length L along unit `dir` from
+// the origin, node 0 encastre, every other node FREE in all 6 DOF (genuinely 3D, no planar restraint).
+// The tip (node n) carries the global 6-component load (forces fx,fy,fz + moments mx,my,mz). refVec is
+// auto-picked non-parallel to `dir` so the section principal axes are well-defined.
+inline void cantileverSpatial(FrameModel& m, int n, real L, const Vec3& dir,
+                              real fx, real fy, real fz, real mx, real my, real mz,
+                              const Material& mat, const Section& sec) {
+    prepMatSec(m, mat, sec);
+    m.nodes.clear(); m.members.clear();
+    const real dl = norm(dir);
+    const Vec3 a = dir * (1.0 / (dl > 0 ? dl : 1.0));
+    const Vec3 ref = (std::fabs(a.z) < 0.9) ? Vec3(0, 0, 1) : Vec3(0, 1, 0);
+    for (int k = 0; k <= n; ++k) {
+        Node nd(k, a.x * L * real(k) / real(n), a.y * L * real(k) / real(n), a.z * L * real(k) / real(n));
+        if (k == 0) nd.fixAll();
+        m.nodes.push_back(nd);
+    }
+    for (int k = 0; k < n; ++k) { Member mm(k, k, k + 1, 0, 0); mm.refVec = ref; m.members.push_back(mm); }
+    NodalLoad nl; nl.node = n;
+    nl.comp[Ux] = fx; nl.comp[Uy] = fy; nl.comp[Uz] = fz;
+    nl.comp[Rx] = mx; nl.comp[Ry] = my; nl.comp[Rz] = mz;
+    m.nodalLoads = { nl };
+}
+
 // X-braced portal in the global X-Z plane (out-of-plane Uy pinned at the free top nodes), for
 // tension-only tests. Stocky columns/beam (section index 0) form a stable moment frame; the two
 // SLENDER diagonals (section index 1) are flagged tension-only. node0/1 = base (encastre),
