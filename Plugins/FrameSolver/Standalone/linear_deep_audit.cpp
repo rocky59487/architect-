@@ -40,8 +40,6 @@ using namespace frame;
 
 namespace {
 
-constexpr real kPi = 3.14159265358979323846;
-
 struct AuditRow {
     std::string area;
     std::string strengthened;

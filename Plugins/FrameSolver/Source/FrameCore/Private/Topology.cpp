@@ -4,6 +4,7 @@
 #include "FrameCore/Connectivity.h"
 #include "FrameCore/ElasticAllowable.h"
 #include "FrameCore/MemberGeometry.h"
+#include "MemberQuery.h"
 
 #include <algorithm>
 #include <cmath>
@@ -42,19 +43,7 @@ real memberStrainEnergy(const FrameModel& m, const SolveResult& r, int e,
 
 namespace {
 
-bool screenable(const FrameModel& m, size_t e) {
-    const Member& mem = m.members[e];
-    return mem.active
-        && mem.matIdx >= 0 && mem.matIdx < (int)m.materials.size()
-        && mem.secIdx >= 0 && mem.secIdx < (int)m.sections.size();
-}
-
-real memberLen(const FrameModel& m, int e) {
-    const Member& mem = m.members[(size_t)e];
-    const int ni = m.nodeIndex(mem.i), nj = m.nodeIndex(mem.j);
-    if (ni < 0 || nj < 0) return 0;
-    return norm(m.nodes[(size_t)nj].pos - m.nodes[(size_t)ni].pos);
-}
+// screenable / memberLen / memberDC are shared from MemberQuery.h.
 
 // External work C = sum over nodal loads of F . u (the compliance). For a linear-elastic model with
 // only nodal loads (no prescribed settlement), C == 2 * total strain energy == 2 * sum(alpha_e).
@@ -68,23 +57,8 @@ real complianceOf(const FrameModel& m, const SolveResult& r) {
     return C;
 }
 
-// Worst (over both ends) elastic D/C of member e -- for the N2 scenario ranking (highest-D/C bars).
-real memberDC(const ElasticAllowable& screen, const FrameModel& m, const SolveResult& r, size_t e) {
-    const Member& mem = m.members[e];
-    const Section&  s = m.sections[(size_t)mem.secIdx];
-    const Capacity& c = m.materials[(size_t)mem.matIdx].cap;
-    const DemandResult di = screen.checkSection(r.memberForces[e].endI, s, c);
-    const DemandResult dj = screen.checkSection(r.memberForces[e].endJ, s, c);
-    return std::max(di.risk, dj.risk);
-}
-
-// FNV-1a hash of the active-state bit vector. The N2 rollback+lock can revisit an active set; a
-// repeat means a cycle, which the guard turns into finite termination (same pattern as S4/S5).
-uint64_t hashActive(const std::vector<char>& act) {
-    uint64_t h = 1469598103934665603ull;
-    for (char a : act) { h ^= (uint64_t)(a ? 1 : 0); h *= 1099511628211ull; }
-    return h;
-}
+// Active-state cycle detection uses fnv1aHashBytes (MemberQuery.h): the N2 rollback+lock can
+// revisit an active set; a repeat means a cycle, which the guard turns into finite termination.
 
 }  // namespace
 
@@ -212,7 +186,7 @@ BESOResult runBESO(const FrameModel& model, const BESOOptions& opts,
 
         // N2: every redundancyCheckEvery steps, probe single-member-removal scenarios. If ANY makes
         // the (already-trimmed) structure Collapse, this step removed too much -> roll the batch back
-        // and LOCK those bars (protected). Honest: LSP-grade robustness, not fail-safe (WS_N N2).
+        // and LOCK those bars (protected). LSP-grade robustness, not fail-safe.
         if (opts.redundancyCheckEvery > 0 && (it % opts.redundancyCheckEvery) == 0) {
             // scenario set: active design bars (optionally the highest-D/C `redundancySamples`).
             std::vector<int> scen;
@@ -245,7 +219,7 @@ BESOResult runBESO(const FrameModel& model, const BESOOptions& opts,
                     isProtected[(size_t)e] = 1;
                 }
                 // FNV-1a cycle guard on the restored active set (rollback+lock could loop).
-                if (!seenStates.insert(hashActive([&] {
+                if (!seenStates.insert(fnv1aHashBytes([&] {
                         std::vector<char> a(nMem);
                         for (size_t e = 0; e < nMem; ++e) a[e] = work.members[e].active ? 1 : 0;
                         return a; }())).second) {

@@ -111,7 +111,6 @@ bool FFrameCoreCircularSectionTest::RunTest(const FString&)
 	using namespace frame;
 	const real rad = 50.0;
 	const Section cir = Section::Circular(rad);
-	const real kPi = 3.14159265358979323846;   // NOTE: 'PI' is a UE macro -> use a local name
 	const real Iexp = kPi * rad * rad * rad * rad / 4.0;
 	TestTrue(TEXT("I = pi r^4/4"), FMath::Abs(cir.Iz - Iexp) < 1e-9 * Iexp);
 	TestTrue(TEXT("Iy == Iz"), FMath::Abs(cir.Iy - cir.Iz) < 1e-12 * Iexp);
@@ -144,7 +143,6 @@ bool FFrameCoreArchConvergenceTest::RunTest(const FString&)
 	const Section sec = Section::Rectangular(100.0, 100.0);   // square: Iy == Iz
 	const Material mat = SteelMat();
 	const real E = 210000.0, R = 2000.0, P = 1000.0;
-	const real kPi = 3.14159265358979323846;   // NOTE: 'PI' is a UE macro -> use a local name
 	const real dExp = (kPi / 4.0) * P * R * R * R / (E * sec.Iz);
 
 	const int Ns[4] = { 8, 16, 32, 64 };

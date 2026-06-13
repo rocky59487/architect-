@@ -7,6 +7,7 @@
 #include "FrameCore/ElasticAllowable.h"
 #include "FrameCore/MemberGeometry.h"
 #include "FrameCore/NMInteraction.h"
+#include "CollapseSupport.h"
 
 #include <algorithm>
 #include <cmath>
@@ -15,41 +16,15 @@
 namespace frame {
 namespace {
 
-int memberIndexById(const FrameModel& m, MemberId id) {
-    for (size_t e = 0; e < m.members.size(); ++e)
-        if (m.members[e].id == id) return (int)e;
-    return -1;
-}
-
-int shellIndexById(const FrameModel& m, int id) {
-    for (size_t s = 0; s < m.shells.size(); ++s)
-        if (m.shells[s].id == id) return (int)s;
-    return -1;
-}
-
-// Temporarily ground a node that no longer carries any active element (a debris node or a
-// bare free node). Fixing every DOF at zero is mathematically inert -- nothing couples to it
-// any more, so it adds no stiffness and draws no reaction -- but it removes the zero-pivot
-// rows that would otherwise read as a spurious mechanism. Its nodal loads leave with it
-// (the load belonged to what fell; leaking it into the grounded remainder would be wrong).
-void pinNode(FrameModel& work, NodeId nid) {
-    const int k = work.nodeIndex(nid);
-    if (k < 0) return;
-    for (int d = 0; d < DOF_PER_NODE; ++d) {
-        work.nodes[(size_t)k].fixed[d] = true;
-        work.nodes[(size_t)k].prescribed[d] = 0;
-    }
-    work.nodalLoads.erase(std::remove_if(work.nodalLoads.begin(), work.nodalLoads.end(),
-                                         [nid](const NodalLoad& nl) { return nl.node == nid; }),
-                          work.nodalLoads.end());
-}
+// FrameModel::memberIndex / shellIndex (FrameModel.h) and pinNode / anyActive (CollapseSupport.h)
+// are shared with the dynamic driver.
 
 // The hinge's NODE-side channel (see Hinge.h): the joint moment -Mp * e_axis the condensed
 // element can no longer deliver. `sign = -1` retracts a previously added moment (used when a
 // driver-formed hinge's member is later removed BRITTLY while its node stays grounded --
 // detached nodes need no retraction, pinNode() erases their loads wholesale).
 void addHingeNodeMoment(FrameModel& work, const CollapseHingeEvent& h, real sign) {
-    const int e = memberIndexById(work, h.member);
+    const int e = work.memberIndex(h.member);
     if (e < 0) return;
     const Member& mem = work.members[(size_t)e];
     const Vec3 pi = work.nodes[(size_t)work.nodeIndex(mem.i)].pos;
@@ -90,12 +65,12 @@ CollapseHistory runProgressiveCollapse(const FrameModel& model, const CollapseOp
     for (auto& sp : work.shellPressures) sp.p *= opts.dlf;
 
     for (MemberId id : opts.initialRemovals)
-        if (memberIndexById(work, id) < 0) {
+        if (work.memberIndex(id) < 0) {
             H.diagnostic = "initialRemovals references missing member id " + std::to_string(id);
             return H;
         }
     for (int sid : opts.initialShellRemovals)
-        if (shellIndexById(work, sid) < 0) {
+        if (work.shellIndex(sid) < 0) {
             H.diagnostic = "initialShellRemovals references missing shell id " + std::to_string(sid);
             return H;
         }
@@ -117,7 +92,7 @@ CollapseHistory runProgressiveCollapse(const FrameModel& model, const CollapseOp
 
         // 1) apply the pending event(s)
         for (MemberId id : pending) {
-            work.members[(size_t)memberIndexById(work, id)].active = false;
+            work.members[(size_t)work.memberIndex(id)].active = false;
             S.removedMembers.push_back(id);
             // a brittle removal of a member the driver hinged earlier: its node-side moments
             // must leave with it (the node may stay grounded, so pinNode never sees them)
@@ -126,7 +101,7 @@ CollapseHistory runProgressiveCollapse(const FrameModel& model, const CollapseOp
         }
         pending.clear();
         for (int sid : pendingShells) {
-            work.shells[(size_t)shellIndexById(work, sid)].active = false;
+            work.shells[(size_t)work.shellIndex(sid)].active = false;
             S.removedShells.push_back(sid);
         }
         pendingShells.clear();
@@ -147,18 +122,15 @@ CollapseHistory runProgressiveCollapse(const FrameModel& model, const CollapseOp
             return H;
         }
         for (const FragmentCluster& fc : conn.detached) {
-            for (MemberId id : fc.members) work.members[(size_t)memberIndexById(work, id)].active = false;
-            for (int sid : fc.shells)      work.shells[(size_t)shellIndexById(work, sid)].active = false;
+            for (MemberId id : fc.members) work.members[(size_t)work.memberIndex(id)].active = false;
+            for (int sid : fc.shells)      work.shells[(size_t)work.shellIndex(sid)].active = false;
             for (NodeId nid : fc.nodes)    pinNode(work, nid);
             S.detached.push_back(fc);
         }
         for (NodeId nid : conn.looseNodes) pinNode(work, nid);
 
         // 3) anything left to carry load?
-        bool anyActive = false;
-        for (const Member& mem : work.members)  anyActive = anyActive || mem.active;
-        for (const ShellQuad& sh : work.shells) anyActive = anyActive || sh.active;
-        if (!anyActive) {
+        if (!anyActive(work)) {
             S.u.assign(work.nodes.size() * DOF_PER_NODE, 0.0);   // everything detached reads 0
             H.outcome = CollapseOutcome::Collapsed;
             H.diagnostic = "no active element remains grounded";

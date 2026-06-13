@@ -16,7 +16,6 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(FFrameCoreDynCollapseOutcomesTest,
 bool FFrameCoreDynCollapseOutcomesTest::RunTest(const FString& /*Parameters*/)
 {
     using namespace frame;
-    const real kPi = 3.14159265358979323846;
     const real E = 200000.0, Gs = 80000.0, rho = 7850.0, L = 1000.0, P = 10000.0;
     Section sec = Section::Rectangular(100.0, 100.0);
     Material strong(E, Gs, rho); strong.cap = Capacity::make(1e9, 1e9, 1e9);

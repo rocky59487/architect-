@@ -45,11 +45,11 @@ inline MatX fragmentConsistentMass(const FragmentCluster& fc, const FrameModel& 
     };
     std::string why;
     for (MemberId mid : fc.members) {
-        int e = -1; for (size_t k = 0; k < work.members.size(); ++k) if (work.members[k].id == mid) { e = (int)k; break; }
+        const int e = work.memberIndex(mid);
         if (e >= 0) { BeamColumnElement el(e); if (el.prepare(work, SolveOptions{}, why)) stamp(el); }
     }
     for (int sid : fc.shells) {
-        int s = -1; for (size_t k = 0; k < work.shells.size(); ++k) if (work.shells[k].id == sid) { s = (int)k; break; }
+        const int s = work.shellIndex(sid);
         if (s >= 0) { MITC4ShellElement el(s); if (el.prepare(work, SolveOptions{}, why)) stamp(el); }
     }
     return M;

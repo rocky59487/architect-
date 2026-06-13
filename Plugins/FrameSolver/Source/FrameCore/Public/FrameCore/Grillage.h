@@ -1,12 +1,10 @@
 #pragma once
 #include "FrameCore/FrameModel.h"
-#include "FrameCore/FrameTypes.h"
 #include <string>
 
 namespace frame { namespace grillage {
 
-// #9 grillage (woven beam-grid) preprocessing — seam ③ (feed the same solver a richer
-// model). An isotropic rectangular plate is idealized as a grid of longitudinal +
+// Grillage (woven beam-grid) preprocessing. An isotropic rectangular plate is idealized as a grid of longitudinal +
 // transverse beams (Hambly, "Bridge Deck Behaviour"). Each beam represents a slab strip
 // of tributary width w and thickness t. The strip rigidities are nu-inflated so the
 // equivalent orthotropic plate matches the isotropic plate's Dx = Dy = 2H = D exactly

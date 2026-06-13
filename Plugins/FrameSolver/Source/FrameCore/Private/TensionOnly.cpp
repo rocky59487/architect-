@@ -1,6 +1,7 @@
 #include "FrameCore/TensionOnly.h"
 #include "FrameCore/Reanalysis.h"
 #include "FrameCore/MemberGeometry.h"
+#include "MemberQuery.h"
 
 #include <set>
 #include <vector>
@@ -25,14 +26,9 @@ real memberElongation(const FrameModel& m, const SolveResult& r, int e) {
     return dot(duj - dui, ax);
 }
 
-// FNV-1a hash of the tension-only active state (one bit per TO member, in toIdx order). The
-// iteration is deterministic, so a repeated state means a flip-flop cycle: a finite state space
-// (2^n_TO) guarantees a repeat within finitely many steps, which the guard turns into termination.
-uint64_t hashState(const std::vector<char>& act) {
-    uint64_t h = 1469598103934665603ull;
-    for (char a : act) { h ^= (uint64_t)(a ? 1 : 0); h *= 1099511628211ull; }
-    return h;
-}
+// State hashing for cycle detection uses fnv1aHashBytes (MemberQuery.h): the iteration is
+// deterministic, so a repeated state means a flip-flop cycle; a finite state space (2^n_TO)
+// guarantees a repeat within finitely many steps, which the guard turns into termination.
 
 // One active-set fixed-point run on a fresh ReSolveSession (each flip = exact rank-6 Woodbury
 // update). allowReact=false -> monotone (deactivate-only) policy. Fills converged / cycled /
@@ -54,7 +50,7 @@ TensionOnlyResult iterateTO(const FrameModel& model, const std::vector<int>& toI
     for (size_t k = 0; k < toIdx.size(); ++k) act[k] = model.members[(size_t)toIdx[k]].active ? 1 : 0;
 
     std::set<uint64_t> seen;
-    seen.insert(hashState(act));   // the starting state counts as visited
+    seen.insert(fnv1aHashBytes(act));   // the starting state counts as visited
 
     SolveResult sr;
     for (int it = 1; it <= opts.maxIter; ++it) {
@@ -86,7 +82,7 @@ TensionOnlyResult iterateTO(const FrameModel& model, const std::vector<int>& toI
         }
 
         // cycle guard: the NEW active state was seen before -> a flip-flop, bail to the fallback
-        if (!seen.insert(hashState(act)).second) {
+        if (!seen.insert(fnv1aHashBytes(act)).second) {
             R.cycled = true;
             R.finalState = sr;
             return R;

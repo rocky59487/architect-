@@ -2,9 +2,7 @@
 // with cross-event state inheritance and momentum-preserving debris handoff. Each event re-factors
 // FRESH (assembleAndFactor) -- the connectivity cleanup pins debris nodes (a support change beyond
 // the ReSolve same-topology regime), and rebuilding the modal/Ritz basis needs the new K'_ff factor.
-// Mirrors the static runProgressiveCollapse working-copy / cleanup contract; ports the validated
-// scratch prototype (Research/WS_N_incremental/exp_dynamic_inherit.cpp) for the Newmark / projection
-// / momentum math. Eigen lives only here + the included Private headers (POD public boundary).
+// Mirrors the static runProgressiveCollapse working-copy / cleanup contract.
 #include "FrameCore/DynamicCollapse.h"
 #include "FrameCore/FrameSolver.h"
 #include "FrameCore/ElasticAllowable.h"
@@ -14,6 +12,7 @@
 #include "MITC4ShellElement.h"
 #include "FragmentMomentum.h"
 #include "FrameEigen.h"
+#include "CollapseSupport.h"
 
 #include <algorithm>
 #include <cmath>
@@ -25,36 +24,15 @@
 namespace frame {
 namespace {
 
-constexpr real kPi = 3.14159265358979323846;
-
-int memberIndexById(const FrameModel& m, MemberId id) {
-    for (size_t e = 0; e < m.members.size(); ++e) if (m.members[e].id == id) return (int)e;
-    return -1;
-}
-int shellIndexById(const FrameModel& m, int id) {
-    for (size_t s = 0; s < m.shells.size(); ++s) if (m.shells[s].id == id) return (int)s;
-    return -1;
-}
-
-// nf x nf free-free sparse submatrix via the free-DOF map (mirrors Reanalysis.cpp::reduceFFsp).
-SpMat reduceFFsp(const SpMat& Kfull, const std::vector<int>& fmap, int nf) {
-    std::vector<Triplet> t; t.reserve((size_t)Kfull.nonZeros());
-    for (int c = 0; c < Kfull.outerSize(); ++c)
-        for (SpMat::InnerIterator it(Kfull, c); it; ++it) {
-            const int r = it.row();
-            if (fmap[(size_t)r] >= 0 && fmap[(size_t)c] >= 0)
-                t.emplace_back(fmap[(size_t)r], fmap[(size_t)c], it.value());
-        }
-    SpMat R(nf, nf); R.setFromTriplets(t.begin(), t.end()); R.makeCompressed();
-    return R;
-}
+// kPi (FrameEigen.h), reduceFF (PreparedSystemImpl.h) and FrameModel::memberIndex/shellIndex
+// are shared — this TU no longer keeps file-local copies.
 
 // Global consistent mass of the prepared (active) elements, reduced to free DOFs.
 SpMat massFF(const PreparedSystem::Impl& S) {
     std::vector<Triplet> mt;
     for (const auto& el : S.elems) el->assembleMass(mt);
     SpMat M(S.N, S.N); M.setFromTriplets(mt.begin(), mt.end());
-    return reduceFFsp(M, S.fmap, S.nf);
+    return reduceFF(M, S.fmap, S.nf);
 }
 
 // Reduced load vector Ff = F_f - K_fc u_c (nodal + active-element equivalent loads + prescribed
@@ -106,21 +84,7 @@ VecX reduceToFree(const VecX& u_N, const std::vector<int>& fmap, int nf) {
     return uf;
 }
 
-// Ground a node that no longer carries any active element (debris / bare free node). Mirrors
-// Collapse.cpp::pinNode: fix all DOFs at zero (inert -- nothing couples to it) and drop its loads.
-void pinNode(FrameModel& work, NodeId nid) {
-    const int k = work.nodeIndex(nid);
-    if (k < 0) return;
-    for (int d = 0; d < DOF_PER_NODE; ++d) { work.nodes[(size_t)k].fixed[d] = true; work.nodes[(size_t)k].prescribed[d] = 0; }
-    work.nodalLoads.erase(std::remove_if(work.nodalLoads.begin(), work.nodalLoads.end(),
-                          [nid](const NodalLoad& nl) { return nl.node == nid; }), work.nodalLoads.end());
-}
-
-bool anyActive(const FrameModel& work) {
-    for (const Member& m : work.members)  if (m.active) return true;
-    for (const ShellQuad& s : work.shells) if (s.active) return true;
-    return false;
-}
+// pinNode / anyActive are shared with the static driver (CollapseSupport.h).
 
 // ---------------------------------------------------------------- basis generation
 // Pure eigenmodes (dense GES): K phi = w2 M phi, phi M-orthonormal, ascending w2. Small models.
@@ -134,7 +98,7 @@ void denseModes(const SpMat& Kff, const SpMat& Mff, int m, MatX& Phi, VecX& W2) 
     Phi = V.leftCols(mm);
 }
 
-// Load-dependent Ritz vectors (Wilson 1985), [NEW CODE] per spec S2 #4. Seeds with `g`, builds an
+// Load-dependent Ritz vectors (Wilson 1985). Seeds with `g`, builds an
 // M-orthonormal Krylov-like block via K^{-1}, then a Rayleigh-Ritz projection. Full basis (m=nf)
 // spans the whole space -> identical to denseModes there (F37b gate). Degenerate vectors are
 // replaced by a deterministic random restart (reproducible builds).
@@ -220,7 +184,7 @@ ConfigSystem buildConfig(const FrameModel& work, const DynCollapseOptions& opts,
     if (S.singular) { cfg.diag = S.diagnostic.empty() ? "singular configuration" : S.diagnostic; cfg.ps = std::move(ps); return cfg; }
 
     cfg.N = S.N; cfg.nf = S.nf; cfg.fmap = S.fmap;
-    cfg.Kff = reduceFFsp(S.K, S.fmap, S.nf);
+    cfg.Kff = reduceFF(S.K, S.fmap, S.nf);
     cfg.Mff = massFF(S);
     cfg.Fff = reducedLoad(work, S);
     cfg.u0ff = S.ldlt.solve(cfg.Fff);
@@ -303,8 +267,8 @@ void cleanupFragments(FrameModel& work, DynCollapseEvent& ev, const VecX* v_N) {
     if (!conn.valid) return;
     for (FragmentCluster fc : conn.detached) {
         if (v_N) fillFragmentVelocity(fc, work, *v_N);
-        for (MemberId id : fc.members) work.members[(size_t)memberIndexById(work, id)].active = false;
-        for (int sid : fc.shells)      work.shells[(size_t)shellIndexById(work, sid)].active = false;
+        for (MemberId id : fc.members) work.members[(size_t)work.memberIndex(id)].active = false;
+        for (int sid : fc.shells)      work.shells[(size_t)work.shellIndex(sid)].active = false;
         for (NodeId nid : fc.nodes)    pinNode(work, nid);
         ev.detached.push_back(fc);
     }
@@ -325,14 +289,14 @@ DynCollapseHistory runDynamicCollapse(const FrameModel& model, const DynCollapse
 
     FrameModel work = model;   // the caller's model is never mutated
     for (MemberId id : opts.initialRemovals)
-        if (memberIndexById(work, id) < 0) { H.diagnostic = "initialRemovals references missing member id " + std::to_string(id); return H; }
+        if (work.memberIndex(id) < 0) { H.diagnostic = "initialRemovals references missing member id " + std::to_string(id); return H; }
     for (int sid : opts.initialShellRemovals)
-        if (shellIndexById(work, sid) < 0) { H.diagnostic = "initialShellRemovals references missing shell id " + std::to_string(sid); return H; }
+        if (work.shellIndex(sid) < 0) { H.diagnostic = "initialShellRemovals references missing shell id " + std::to_string(sid); return H; }
 
     // ---- t=0 scenario: apply initial removals + fragment cleanup (zero handoff velocity, static start)
     DynCollapseEvent ev0; ev0.t = 0; ev0.mode = FailMode::None;
-    for (MemberId id : opts.initialRemovals) { work.members[(size_t)memberIndexById(work, id)].active = false; ev0.removedMembers.push_back(id); }
-    for (int sid : opts.initialShellRemovals) { work.shells[(size_t)shellIndexById(work, sid)].active = false; ev0.removedShells.push_back(sid); }
+    for (MemberId id : opts.initialRemovals) { work.members[(size_t)work.memberIndex(id)].active = false; ev0.removedMembers.push_back(id); }
+    for (int sid : opts.initialShellRemovals) { work.shells[(size_t)work.shellIndex(sid)].active = false; ev0.removedShells.push_back(sid); }
     cleanupFragments(work, ev0, nullptr);
     const bool hasInitialEvent = !ev0.removedMembers.empty() || !ev0.removedShells.empty() || !ev0.detached.empty();
 
@@ -401,8 +365,8 @@ DynCollapseHistory runDynamicCollapse(const FrameModel& model, const DynCollapse
         const VecX uN_f = uN;
         const VecX vN_f = scatterToGlobal(vff, work, cfg.fmap, cfg.N, false);
 
-        if (best.kind == 0) { work.members[(size_t)memberIndexById(work, best.id)].active = false; ev.removedMembers.push_back(best.id); }
-        else                { work.shells[(size_t)shellIndexById(work, best.id)].active = false;  ev.removedShells.push_back(best.id); }
+        if (best.kind == 0) { work.members[(size_t)work.memberIndex(best.id)].active = false; ev.removedMembers.push_back(best.id); }
+        else                { work.shells[(size_t)work.shellIndex(best.id)].active = false;  ev.removedShells.push_back(best.id); }
         cleanupFragments(work, ev, &vN_f);
 
         real fragKE = 0; for (const FragmentCluster& fc : ev.detached) fragKE += fragmentKE(fc);

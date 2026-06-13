@@ -15,12 +15,10 @@
 //
 // N2 (opt-in collapse robustness): every k steps, probe single-member-removal scenarios with the
 // progressive-collapse driver; if any scenario Collapses, roll back this step's removal and LOCK
-// those members (protected, never removable). Honest novelty positioning (WS_N section N2): the
-// CLOSEST prior art is fail-safe TRUSS TO -- Stolpe 2019 and Zhu 2023 already optimize discrete
-// members against single-member-removal damage cases (Jansen 2014 is the continuum SIMP original).
-// What differs here is only the EVALUATOR: an LSP sequential-linear progressive-collapse driver
-// (Stable/Collapsed endpoint + dlf + fragment connectivity) in place of plastic/conic LP. So this is
-// NOT a new method and NOT a global-optimum guarantee, and must NOT be called "fail-safe".
+// those members (protected, never removable). Prior art: fail-safe truss TO (Stolpe 2019, Zhu 2023)
+// optimizes discrete members against single-member-removal (Jansen 2014 is the SIMP original). Here
+// the evaluator is an LSP progressive-collapse driver (not LP/SDP), so this is NOT a global-optimum
+// guarantee and must NOT be called "fail-safe".
 //
 // Honest scope: a heuristic (no global optimum; trusses' global optimum is LP/SDP ground structure);
 // linear-elastic sensitivity; FIRST RELEASE IS ONE-WAY hard-kill (no bi-directional re-admission --

@@ -195,7 +195,7 @@ bool FFrameCoreModalBeamTest::RunTest(const FString&)
 	using namespace frame;
 	Section sec = Section::Rectangular(100.0, 100.0);
 	Material mat(210000.0, 80769.0, 7850.0);
-	const double E = 210000.0, kPi = 3.14159265358979323846, rhoC = mat.rho * 1.0e-12;
+	const double E = 210000.0, rhoC = mat.rho * 1.0e-12;
 
 	{   // simply-supported fundamental omega1 = (pi/L)^2 sqrt(EI/rhoA)
 		const int n = 12; const double L = 4000.0;
@@ -229,7 +229,7 @@ bool FFrameCoreBucklingColumnTest::RunTest(const FString&)
 	using namespace frame;
 	Section sec = Section::Rectangular(100.0, 100.0);
 	Material mat(210000.0, 80769.0, 7850.0);
-	const double E = 210000.0, kPi = 3.14159265358979323846, Pref = 1000.0;
+	const double E = 210000.0, Pref = 1000.0;
 
 	{   // pinned-pinned: Pcr = pi^2 EI / L^2
 		const int n = 10; const double L = 3000.0;
@@ -262,7 +262,6 @@ bool FFrameCoreResponseSpectrumTest::RunTest(const FString&)
 	using namespace frame;
 	Section secR = Section::Rectangular(80.0, 120.0);   // Iy != Iz (non-degenerate planes)
 	Material mat(210000.0, 80769.0, 7850.0);
-	const double kPi = 3.14159265358979323846;
 	Spectrum sp; sp.T = { 0.0, 10.0 }; sp.Sa = { 9810.0, 9810.0 };
 	auto maxOf = [](const std::vector<double>& v) { double m = 0; for (double e : v) m = FMath::Max(m, e); return m; };
 
@@ -296,7 +295,6 @@ bool FFrameCoreDynamicsStepTest::RunTest(const FString&)
 	using namespace frame;
 	Section sec = Section::Rectangular(100.0, 100.0);
 	Material mat(210000.0, 80769.0, 7850.0);
-	const double kPi = 3.14159265358979323846;
 	const int n = 10; const double L = 3000.0;
 	FrameModel m; fixtures::cantileverBeamN(m, n, L, mat, sec);
 	NodalLoad nl; nl.node = n; nl.comp[Uz] = -1000.0; m.nodalLoads = { nl };

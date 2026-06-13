@@ -5,8 +5,7 @@
 
 namespace frame {
 
-// Elastic / allowable-stress combined-stress screen (spec PFSFv2-to-UE5 §1.4).
-// NOT RC ultimate strength.
+// Elastic / allowable-stress combined-stress screen.  NOT RC ultimate strength.
 DemandResult ElasticAllowable::checkSection(const MemberEndForces& f, const Section& s, const Capacity& c) const {
     const real A  = std::max(s.A,   real(1e-12));
     const real Wy = std::max(s.Wy(), real(1e-12));
@@ -16,7 +15,7 @@ DemandResult ElasticAllowable::checkSection(const MemberEndForces& f, const Sect
     const real sN    = f.N / A;                                      // compression-positive
     // Biaxial bending stress. A round section has no worst corner, so the resultant
     // moment sqrt(My^2+Mz^2)/W is exact; a rectangle uses the conservative corner sum
-    // |My|/Wy + |Mz|/Wz (report PFSFv2-to-UE5 §0c).
+    // |My|/Wy + |Mz|/Wz.
     const real sM    = (s.shape == Section::Shape::Circular)
                        ? std::sqrt(f.My * f.My + f.Mz * f.Mz) / Wz   // Wy == Wz for a circle
                        : std::abs(f.My) / Wy + std::abs(f.Mz) / Wz;

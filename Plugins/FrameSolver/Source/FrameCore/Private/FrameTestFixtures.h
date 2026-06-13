@@ -116,7 +116,6 @@ inline void torsionReleaseMechanism(FrameModel& m, const Material& mat, const Se
 inline void circularArchCantilever(FrameModel& m, real R, int nSeg, real P,
                                    const Material& mat, const Section& sec) {
     prepMatSec(m, mat, sec);
-    const real kPi = 3.14159265358979323846;   // NOTE: 'PI' is a UE macro -> use a local name
     m.nodes.clear();
     m.members.clear();
     for (int k = 0; k <= nSeg; ++k) {
@@ -635,7 +634,6 @@ inline void pinchedCylinder(FrameModel& m, real R, real L, real t, real P,
     m = FrameModel{};
     m.materials.reserve(1);
     m.materials.push_back(mat);
-    const real kPi = 3.14159265358979323846;
     auto gid = [nth](int i, int j) { return j * (nth + 1) + i; };
     for (int j = 0; j <= nz; ++j)
         for (int i = 0; i <= nth; ++i) {

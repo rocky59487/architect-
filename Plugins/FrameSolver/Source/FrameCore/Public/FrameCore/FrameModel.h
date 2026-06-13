@@ -29,8 +29,10 @@ struct FrameModel {
 
     int dofCount() const { return DOF_PER_NODE * static_cast<int>(nodes.size()); }
 
-    // Index into nodes[] for a given NodeId, or -1 if not found.
+    // Index into nodes[] / members[] / shells[] for a given id, or -1 if not found.
     int nodeIndex(NodeId id) const;
+    int memberIndex(MemberId id) const;
+    int shellIndex(int id) const;
 
     // Structural sanity (ids resolve, non-null mat/sec, positive A/I/E/L). On
     // failure returns false and fills `why`.

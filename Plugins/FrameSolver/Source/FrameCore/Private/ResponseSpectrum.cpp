@@ -27,7 +27,6 @@ ResponseSpectrumResult solveResponseSpectrum(const PreparedSystem& prepared, con
     R.totalMass = r.dot(Mr);                              // total directional mass r^T M r
 
     const int nm = static_cast<int>(modes.modes.size());
-    const real twoPi = 2.0 * 3.14159265358979323846;
     std::vector<VecX> umode(nm);                          // per-mode peak displacement
     std::vector<real> Vmode(nm);                          // per-mode base shear
     R.effMass.assign(static_cast<size_t>(nm), 0.0);

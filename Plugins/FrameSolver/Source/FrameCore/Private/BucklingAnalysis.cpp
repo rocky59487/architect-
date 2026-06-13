@@ -3,30 +3,13 @@
 #include "SparseEigsolver.h"
 
 #include <algorithm>
-#include <cmath>
 #include <vector>
 
 namespace frame {
 
 namespace {
 
-// Free-free (nf x nf) sparse submatrix of a full N x N sparse matrix via the free-DOF map,
-// scaled by `scale`. Mirrors the dense scatter used by the historical path, but keeps the
-// reduced operator sparse so the subspace iteration can reuse K_ff's existing LDLT.
-SpMat reduceFF(const SpMat& Afull, const std::vector<int>& fmap, int nf, real scale) {
-    std::vector<Triplet> t;
-    t.reserve(static_cast<size_t>(Afull.nonZeros()));
-    for (int c = 0; c < Afull.outerSize(); ++c)
-        for (SpMat::InnerIterator it(Afull, c); it; ++it) {
-            const int r = it.row();
-            if (fmap[r] >= 0 && fmap[c] >= 0)
-                t.emplace_back(fmap[r], fmap[c], scale * it.value());
-        }
-    SpMat R(nf, nf);
-    R.setFromTriplets(t.begin(), t.end());
-    R.makeCompressed();
-    return R;
-}
+// reduceFF (free-free submatrix extraction) is shared from PreparedSystemImpl.h.
 
 // Historical DENSE path: (-Kg_ff) phi = gamma K_ff phi, criticalFactor = 1/gamma_max. Kept
 // bit-identical to the pre-S1 implementation (so F23 is unchanged); the only refactor is that

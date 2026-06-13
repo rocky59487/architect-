@@ -5,7 +5,7 @@
 
 namespace frame {
 
-// Elastic / allowable-stress combined-stress screen (spec PFSFv2-to-UE5 §1.4).
+// Elastic / allowable-stress combined-stress screen.
 //   sigma = N/A +/- M/W ,  tau = |V|/A ,  demand/capacity per mode, argmax = dominant.
 // This is a real-time SCREENING layer, NOT RC ultimate strength (no P-M interaction,
 // no concrete nonlinearity). Biaxial bending uses the conservative |My|/Wy + |Mz|/Wz

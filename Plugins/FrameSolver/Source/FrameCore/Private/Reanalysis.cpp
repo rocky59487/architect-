@@ -3,6 +3,7 @@
 #include "IElement.h"
 #include "BeamColumnElement.h"
 #include "MITC4ShellElement.h"
+#include "ElementFactory.h"
 
 #include <algorithm>
 #include <memory>
@@ -12,8 +13,7 @@
 namespace frame {
 
 namespace {
-std::unique_ptr<IElement> makeMemberElem(int e) { return std::make_unique<BeamColumnElement>(e); }
-std::unique_ptr<IElement> makeShellElem(int s)  { return std::make_unique<MITC4ShellElement>(s); }
+// makeMemberElem / makeShellElem are shared from ElementFactory.h.
 
 // Eigen preconditioner whose solve() forwards to the STALE baseline LDLT — turns Eigen's CG into a
 // stale-factor-preconditioned solve of the modified K' (Tier-2). Mirrors the research prototype.
@@ -28,19 +28,7 @@ struct StalePrecond {
     Eigen::ComputationInfo info() const { return Eigen::Success; }
 };
 
-// nf x nf free-free sparse submatrix of the full N x N K via the free-DOF map.
-SpMat reduceFFsp(const SpMat& Kfull, const std::vector<int>& fmap, int nf) {
-    std::vector<Triplet> t;
-    t.reserve((size_t)Kfull.nonZeros());
-    for (int c = 0; c < Kfull.outerSize(); ++c)
-        for (SpMat::InnerIterator it(Kfull, c); it; ++it) {
-            const int r = it.row();
-            if (fmap[(size_t)r] >= 0 && fmap[(size_t)c] >= 0)
-                t.emplace_back(fmap[(size_t)r], fmap[(size_t)c], it.value());
-        }
-    SpMat R(nf, nf); R.setFromTriplets(t.begin(), t.end()); R.makeCompressed();
-    return R;
-}
+// reduceFF (free-free submatrix extraction) is shared from PreparedSystemImpl.h.
 }  // namespace
 
 // ============================================================================
@@ -299,7 +287,7 @@ SolveResult ReSolveSession::solve(ReanalysisStats* stats) {
         // baseline factor as the preconditioner + the baseline solve as the warm-start guess.
         // Tolerance-level (NOT bit-identical); on non-convergence fall through to Tier-3 (always correct).
         const VecX  u0ff = P.S().ldlt.solve(Ff);
-        const SpMat Kff  = reduceFFsp(Kcur, fmap, nf);
+        const SpMat Kff  = reduceFF(Kcur, fmap, nf);
         Eigen::ConjugateGradient<SpMat, Eigen::Lower | Eigen::Upper, StalePrecond> cg;
         cg.preconditioner().ldlt = &P.S().ldlt;
         cg.setTolerance(P.opts.pcgTol);

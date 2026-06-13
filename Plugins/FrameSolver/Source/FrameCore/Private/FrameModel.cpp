@@ -3,11 +3,26 @@
 #include <algorithm>
 #include <cmath>
 
+static_assert(sizeof(frame::Node) > 0, "Node must be a complete type");
+static_assert(sizeof(frame::Material) > 0, "Material must be a complete type");
+
 namespace frame {
 
 int FrameModel::nodeIndex(NodeId id) const {
     for (size_t k = 0; k < nodes.size(); ++k)
         if (nodes[k].id == id) return static_cast<int>(k);
+    return -1;
+}
+
+int FrameModel::memberIndex(MemberId id) const {
+    for (size_t k = 0; k < members.size(); ++k)
+        if (members[k].id == id) return static_cast<int>(k);
+    return -1;
+}
+
+int FrameModel::shellIndex(int id) const {
+    for (size_t k = 0; k < shells.size(); ++k)
+        if (shells[k].id == id) return static_cast<int>(k);
     return -1;
 }
 

@@ -9,35 +9,8 @@ namespace frame {
 
 namespace {
 
-// Free-free (nf x nf) sparse submatrix of a full N x N sparse matrix via the free-DOF map.
-// (Same scatter the buckling path uses; kept local so each analysis TU is self-contained.)
-SpMat reduceFF(const SpMat& Afull, const std::vector<int>& fmap, int nf) {
-    std::vector<Triplet> t;
-    t.reserve(static_cast<size_t>(Afull.nonZeros()));
-    for (int c = 0; c < Afull.outerSize(); ++c)
-        for (SpMat::InnerIterator it(Afull, c); it; ++it) {
-            const int r = it.row();
-            if (fmap[r] >= 0 && fmap[c] >= 0) t.emplace_back(fmap[r], fmap[c], it.value());
-        }
-    SpMat R(nf, nf);
-    R.setFromTriplets(t.begin(), t.end());
-    R.makeCompressed();
-    return R;
-}
-
-// Positive-definiteness test of an LDLT-factored matrix from its diagonal D. SimplicialLDLT
-// reports info()==Success even for an indefinite matrix (it does not pivot for stability), so a
-// non-positive / near-zero entry in D is how a singular-or-indefinite K_T is detected — mirrors
-// the mechanism-detection test in assembleAndFactor. tol is relative to max|D| (scale-invariant).
-bool ldltPositiveDefinite(const LDLTSolver& s, real relTol) {
-    const VecX D = s.vectorD();
-    real maxAbs = 0;
-    for (int i = 0; i < D.size(); ++i) maxAbs = std::max(maxAbs, std::abs(D(i)));
-    const real tol = relTol * std::max<real>(1, maxAbs);
-    for (int i = 0; i < D.size(); ++i)
-        if (!(D(i) > tol)) return false;
-    return true;
-}
+// reduceFF (free-free submatrix) and ldltPositiveDefinite are shared from
+// PreparedSystemImpl.h / FrameEigen.h.
 
 // Recover the FULL second-order state from a reduced free-DOF displacement uf. Scatters in the
 // prescribed (support) values, rebuilds the load vector to report reactions, and recovers member
@@ -147,7 +120,7 @@ PDeltaResult runPDelta(const FrameModel& model, const PDeltaOptions& opts) {
 
     // ---- FROZEN PATH: pseudo-load iteration reusing the existing K_e factorization ----
     //   x_{k+1} = K_e^-1 ( F_ff - Kg_ff x_k ),   x_0 = u_lin_ff
-    // Converges (rate ~ P/P_cr) for P < P_cr. Two [NEW CODE] safeguards harden the bare iteration
+    // Converges (rate ~ P/P_cr) for P < P_cr. Two safeguards harden the bare iteration
     // the research prototype used:
     //   (a) PROTECTED extrapolation: Aitken geometric extrapolation gated by a stability window
     //       (0<rho<0.95 AND |rho_k - rho_{k-1}|<0.2) with UNDO — if the step after an extrapolation

@@ -25,8 +25,6 @@ cl /nologo /EHsc /std:c++17 /O2 /MD /utf-8 /DEIGEN_MPL2_ONLY ^
    /I"%EIGEN%" ^
    /I"Source\FrameCore\Public" ^
    /I"Source\FrameCore\Private" ^
-   Source\FrameCore\Private\Node.cpp ^
-   Source\FrameCore\Private\Material.cpp ^
    Source\FrameCore\Private\Section.cpp ^
    Source\FrameCore\Private\Member.cpp ^
    Source\FrameCore\Private\FrameModel.cpp ^

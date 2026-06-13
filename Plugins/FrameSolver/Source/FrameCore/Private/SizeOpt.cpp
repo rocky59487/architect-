@@ -1,6 +1,7 @@
 #include "FrameCore/SizeOpt.h"
 #include "FrameCore/FrameSolver.h"
 #include "FrameCore/ElasticAllowable.h"
+#include "MemberQuery.h"
 
 #include <algorithm>
 #include <cmath>
@@ -61,23 +62,6 @@ uint64_t hashAreas(const std::vector<real>& a) {
     return h;
 }
 
-// Worst (over both ends) elastic D/C of member e under solve result r.
-real memberDC(const ElasticAllowable& screen, const FrameModel& m, const SolveResult& r, size_t e) {
-    const Member& mem = m.members[e];
-    const Section&  s = m.sections[(size_t)mem.secIdx];
-    const Capacity& c = m.materials[(size_t)mem.matIdx].cap;
-    const DemandResult di = screen.checkSection(r.memberForces[e].endI, s, c);
-    const DemandResult dj = screen.checkSection(r.memberForces[e].endJ, s, c);
-    return std::max(di.risk, dj.risk);
-}
-
-bool screenable(const FrameModel& m, size_t e) {
-    const Member& mem = m.members[e];
-    return mem.active
-        && mem.matIdx >= 0 && mem.matIdx < (int)m.materials.size()
-        && mem.secIdx >= 0 && mem.secIdx < (int)m.sections.size();
-}
-
 }  // namespace
 
 SizeOptResult runSizeOptimization(const FrameModel& model, const SizeOptOptions& opts,
@@ -116,16 +100,10 @@ SizeOptResult runSizeOptimization(const FrameModel& model, const SizeOptOptions&
     const ElasticAllowable screen;
     const int nCases = opts.cases.empty() ? 1 : (int)opts.cases.size();
 
-    auto memberLen = [&](int e) -> real {
-        const Member& m = work.members[(size_t)e];
-        const int ni = work.nodeIndex(m.i), nj = work.nodeIndex(m.j);
-        if (ni < 0 || nj < 0) return 0;
-        return norm(work.nodes[(size_t)nj].pos - work.nodes[(size_t)ni].pos);
-    };
     auto sizedVolume = [&]() -> real {
         real vol = 0;
         for (size_t k = 0; k < sized.size(); ++k)
-            vol += area[k] * memberLen(sized[k]);
+            vol += area[k] * memberLen(work, sized[k]);
         return vol;
     };
 
@@ -192,7 +170,7 @@ SizeOptResult runSizeOptimization(const FrameModel& model, const SizeOptOptions&
                 }
                 if (Anew > opts.Amin * (real(1) + real(1e-9)))
                     maxDevFS = std::max(maxDevFS, std::fabs(factor - real(1)));
-                vol += Anew * memberLen(sized[k]);
+                vol += Anew * memberLen(work, sized[k]);
             }
             R.dcHistory.push_back(worstDC);
             R.weightHistory.push_back(vol);

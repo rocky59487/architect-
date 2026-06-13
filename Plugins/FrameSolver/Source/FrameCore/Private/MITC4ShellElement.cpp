@@ -72,6 +72,27 @@ using Mat3x4  = Eigen::Matrix<real, 3, 4>;    // QM6 incompatible-mode strain (3
 using Mat12x4 = Eigen::Matrix<real, 12, 4>;   // QM6 compatible-incompatible coupling
 using Mat4    = Eigen::Matrix<real, 4, 4>;    // QM6 internal bubble block
 using Row4    = Eigen::Matrix<real, 1, 4>;    // QM6 bubble drilling contribution
+using Mat3x3  = Eigen::Matrix<real, 3, 3>;
+
+// Plane-stress constitutive matrix (membrane).
+inline Mat3x3 planeDm(real E, real nu) {
+    Mat3x3 D = Mat3x3::Zero();
+    const real f = E / (1.0 - nu * nu);
+    D(0, 0) = f;       D(0, 1) = nu * f;
+    D(1, 0) = nu * f;  D(1, 1) = f;
+    D(2, 2) = f * (1.0 - nu) * 0.5;
+    return D;
+}
+
+// Plate-bending constitutive matrix (curvature → moment resultant).
+inline Mat3x3 plateDm(real E, real nu, real t) {
+    Mat3x3 D = Mat3x3::Zero();
+    const real Dfac = E * t * t * t / (12.0 * (1.0 - nu * nu));
+    D(0, 0) = Dfac;       D(0, 1) = nu * Dfac;
+    D(1, 0) = nu * Dfac;  D(1, 1) = Dfac;
+    D(2, 2) = Dfac * (1.0 - nu) * 0.5;
+    return D;
+}
 
 // Bending strain-displacement (3x12) in plate DOF order [w,bx,by] x4.
 // kappa = [bx,x ; by,y ; bx,y + by,x].
@@ -142,11 +163,7 @@ const real kShearCorr = 5.0 / 6.0;     // Reissner-Mindlin shear correction fact
 
 // Plate-bending + MITC4-shear 12x12 stiffness in plate DOF order [w,bx,by] x4.
 Mat12 plateK(const real xl[4], const real yl[4], real E, real nu, real G, real t) {
-    Eigen::Matrix<real, 3, 3> Db = Eigen::Matrix<real, 3, 3>::Zero();
-    const real Dfac = E * t * t * t / (12.0 * (1.0 - nu * nu));
-    Db(0, 0) = Dfac;       Db(0, 1) = nu * Dfac;
-    Db(1, 0) = nu * Dfac;  Db(1, 1) = Dfac;
-    Db(2, 2) = Dfac * (1.0 - nu) * 0.5;
+    const Mat3x3 Db = plateDm(E, nu, t);
     const real Ds = kShearCorr * G * t;          // isotropic transverse shear modulus*t
 
     Mat12 K = Mat12::Zero();
@@ -209,11 +226,7 @@ inline Row12 Bdrill(const real xl[4], const real yl[4], real xi, real eta) {
 
 // Membrane + drilling 12x12 stiffness in DOF order [u,v,thz] x4.
 Mat12 membraneK(const real xl[4], const real yl[4], real E, real nu, real G, real t) {
-    Eigen::Matrix<real, 3, 3> Dm = Eigen::Matrix<real, 3, 3>::Zero();
-    const real f = E / (1.0 - nu * nu);
-    Dm(0, 0) = f;       Dm(0, 1) = nu * f;
-    Dm(1, 0) = nu * f;  Dm(1, 1) = f;
-    Dm(2, 2) = f * (1.0 - nu) * 0.5;
+    const Mat3x3 Dm = planeDm(E, nu);
     const real gamma = G * t;            // Hughes-Brezzi drilling penalty (per area)
 
     Mat12 K = Mat12::Zero();
@@ -277,12 +290,7 @@ inline Row4 BdrillIncQM6(const real J0inv[2][2], real xi, real eta) {
 //   K* = Kc - Kca Kaa^-1 Kca^T   (Kaa is SPD, so the inverse is safe).
 Mat12 membraneK_QM6(const real xl[4], const real yl[4], real E, real nu, real G, real t) {
     const Mat12 Kc = membraneK(xl, yl, E, nu, G, t);    // compatible Q4 membrane + drilling
-
-    Eigen::Matrix<real, 3, 3> Dm = Eigen::Matrix<real, 3, 3>::Zero();
-    const real f = E / (1.0 - nu * nu);
-    Dm(0, 0) = f;       Dm(0, 1) = nu * f;
-    Dm(1, 0) = nu * f;  Dm(1, 1) = f;
-    Dm(2, 2) = f * (1.0 - nu) * 0.5;
+    const Mat3x3 Dm = planeDm(E, nu);
     const real gamma = G * t;                           // Hughes-Brezzi drilling penalty
 
     real J0inv[2][2];
@@ -399,11 +407,7 @@ inline Mat3x12 BdkqMine(const real xl[4], const real yl[4], real xi, real eta) {
 
 // DKQ plate-bending 12x12 in plate DOF [w,bx,by] x4 (no shear; 2x2 Gauss). G unused (Kirchhoff).
 Mat12 plateK_DKQ(const real xl[4], const real yl[4], real E, real nu, real /*G*/, real t) {
-    Eigen::Matrix<real, 3, 3> Db = Eigen::Matrix<real, 3, 3>::Zero();
-    const real Dfac = E * t * t * t / (12.0 * (1.0 - nu * nu));
-    Db(0, 0) = Dfac;       Db(0, 1) = nu * Dfac;
-    Db(1, 0) = nu * Dfac;  Db(1, 1) = Dfac;
-    Db(2, 2) = Dfac * (1.0 - nu) * 0.5;
+    const Mat3x3 Db = plateDm(E, nu, t);
 
     Mat12 K = Mat12::Zero();
     for (int a = 0; a < 2; ++a)
@@ -529,8 +533,8 @@ bool MITC4ShellElement::prepare(const FrameModel& model, const SolveOptions& opt
                              : plateK(xl_, yl_, E_, nu_, G_, t_);
     const Mat12 Km = useQM6_ ? membraneK_QM6(xl_, yl_, E_, nu_, G_, t_)
                              : membraneK(xl_, yl_, E_, nu_, G_, t_);
-    const Eigen::Matrix<real, 12, 24> Pb = plateToShellMap();
-    const Eigen::Matrix<real, 12, 24> Pm = membraneToShellMap();
+    static const Eigen::Matrix<real, 12, 24> Pb = plateToShellMap();
+    static const Eigen::Matrix<real, 12, 24> Pm = membraneToShellMap();
     kl_.setZero();
     kl_ += Pb.transpose() * Kp * Pb;
     kl_ += Pm.transpose() * Km * Pm;
@@ -585,24 +589,15 @@ void MITC4ShellElement::recover(const VecX& u, SolveResult& R) const {
     Vec24 ug;
     for (int a = 0; a < 24; ++a) ug(a) = u(dofs_[a]);
     const Vec24 ul = T_ * ug;
-    const Eigen::Matrix<real, 12, 24> Pb = plateToShellMap();
-    const Eigen::Matrix<real, 12, 24> Pmem = membraneToShellMap();
+    static const Eigen::Matrix<real, 12, 24> Pb = plateToShellMap();
+    static const Eigen::Matrix<real, 12, 24> Pmem = membraneToShellMap();
     const Eigen::Matrix<real, 12, 1> dp = Pb * ul;     // plate (w,bx,by)
     const Eigen::Matrix<real, 12, 1> dm = Pmem * ul;   // membrane (u,v,thz)
 
     // Constitutive at the element centre.
-    Eigen::Matrix<real, 3, 3> Db = Eigen::Matrix<real, 3, 3>::Zero();
-    const real Dfac = E_ * t_ * t_ * t_ / (12.0 * (1.0 - nu_ * nu_));
-    Db(0, 0) = Dfac;       Db(0, 1) = nu_ * Dfac;
-    Db(1, 0) = nu_ * Dfac; Db(1, 1) = Dfac;
-    Db(2, 2) = Dfac * (1.0 - nu_) * 0.5;
+    const Mat3x3 Db = plateDm(E_, nu_, t_);
     const real Ds = kShearCorr * G_ * t_;
-
-    Eigen::Matrix<real, 3, 3> Dm = Eigen::Matrix<real, 3, 3>::Zero();
-    const real f = E_ / (1.0 - nu_ * nu_);
-    Dm(0, 0) = f;       Dm(0, 1) = nu_ * f;
-    Dm(1, 0) = nu_ * f; Dm(1, 1) = f;
-    Dm(2, 2) = f * (1.0 - nu_) * 0.5;
+    const Mat3x3 Dm = planeDm(E_, nu_);
 
     const Mat3x12 Bb = useDKQ_ ? BdkqMine(xl_, yl_, 0.0, 0.0) : Bbending(xl_, yl_, 0.0, 0.0);
     const Mat3x12 Bm = Bmembrane(xl_, yl_, 0.0, 0.0);

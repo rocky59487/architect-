@@ -37,7 +37,7 @@
 namespace frame {
 namespace {
 
-constexpr real kPi = 3.14159265358979323846;
+// kPi (FrameEigen.h) and ldltPositiveDefinite (FrameEigen.h) are shared — no file-local copies.
 
 // ----------------------------- SO(3) helpers (Mat3, hand-written, no Eigen/Geometry) -----------------------------
 // skew(w): the cross-product matrix S with S*x = w x x.
@@ -183,16 +183,6 @@ void crCompute3D(CrBeam3D& b, const FrameModel& M, const std::vector<real>& u,
     const Mat3 NA = N * A;
     Ke.block(0, 0, 3, 3) += NA; Ke.block(0, 6, 3, 3) -= NA;
     Ke.block(6, 0, 3, 3) -= NA; Ke.block(6, 6, 3, 3) += NA;
-}
-
-// Positive-definite / non-singular test of an LDLT factor from its diagonal D (mirrors S9 / PDelta).
-bool ldltPosDef(const LDLTSolver& solver, real relTol) {
-    const VecX D = solver.vectorD();
-    real maxAbs = 0;
-    for (int i = 0; i < D.size(); ++i) maxAbs = std::max(maxAbs, std::abs(D(i)));
-    const real tol = relTol * std::max<real>(1, maxAbs);
-    for (int i = 0; i < D.size(); ++i) if (!(D(i) > tol)) return false;
-    return true;
 }
 
 }  // namespace
@@ -501,7 +491,7 @@ CorotationalResult runCorotational(const FrameModel& model, const CorotationalOp
                 if (fmap[(size_t)g] >= 0) rf(fmap[(size_t)g]) = lambda * Fext((Eigen::Index)g) - fint((Eigen::Index)g);
 
             LDLTSolver ldlt; ldlt.compute(Kff);
-            if (ldlt.info() != Eigen::Success || !ldltPosDef(ldlt, opts.solve.pivotTol)) {
+            if (ldlt.info() != Eigen::Success || !ldltPositiveDefinite(ldlt, opts.solve.pivotTol)) {
                 R.diverged = true;
                 R.finalState.singular = true;
                 R.finalState.diagnostic = "co-rotational tangent not positive-definite (limit point; snap-through needs arc-length)";

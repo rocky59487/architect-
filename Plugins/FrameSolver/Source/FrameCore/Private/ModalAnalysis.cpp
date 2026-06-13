@@ -40,7 +40,6 @@ ModalResult solveModal(const PreparedSystem& prepared, const ModalOptions& opts)
         SpMat Mff_s(nf, nf); Mff_s.setFromTriplets(mt.begin(), mt.end()); Mff_s.makeCompressed();
         VecX lambda; MatX vecs;
         if (subspaceSmallest(Kff_s, S.ldlt, Mff_s, kReq, lambda, vecs)) {
-            const real twoPi = 2.0 * 3.14159265358979323846;
             for (int i = 0; i < kReq; ++i) {
                 VecX phi = vecs.col(i);
                 const real mm = phi.dot(Mff_s * phi);
@@ -82,7 +81,6 @@ ModalResult solveModal(const PreparedSystem& prepared, const ModalOptions& opts)
     const MatX evecs = ges.eigenvectors();
 
     const int k = std::min(opts.numModes, static_cast<int>(evals.size()));
-    const real twoPi = 2.0 * 3.14159265358979323846;
     for (int i = 0; i < k; ++i) {
         real lam = evals(i);
         if (lam < 0) lam = 0;                       // guard tiny negative (roundoff / rigid mode)

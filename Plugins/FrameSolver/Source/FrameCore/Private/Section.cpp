@@ -29,7 +29,6 @@ Section Section::Rectangular(real b, real d) {
 // Solid circular section of radius r.
 Section Section::Circular(real r) {
     Section s;
-    const real kPi = 3.14159265358979323846;   // NOTE: 'PI' is a UE macro -> use a local name
     const real r2 = r * r;
     s.A  = kPi * r2;
     s.Iy = s.Iz = kPi * r2 * r2 / 4.0;   // I = pi r^4 / 4 (about any centroidal axis)

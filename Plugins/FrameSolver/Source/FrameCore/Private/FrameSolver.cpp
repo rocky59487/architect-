@@ -2,6 +2,7 @@
 #include "PreparedSystemImpl.h"
 #include "BeamColumnElement.h"
 #include "MITC4ShellElement.h"
+#include "ElementFactory.h"
 
 #include <vector>
 #include <string>
@@ -119,10 +120,10 @@ PreparedSystem assembleAndFactor(const FrameModel& model, const SolveOptions& op
     S.elems.reserve(model.members.size() + model.shells.size());
     for (size_t e = 0; e < model.members.size(); ++e)
         if (model.members[e].active)   // inactive members are excluded from assembly (element removal)
-            S.elems.push_back(std::make_unique<BeamColumnElement>((int)e));
+            S.elems.push_back(makeMemberElem((int)e));
     for (size_t s = 0; s < model.shells.size(); ++s)
         if (model.shells[s].active)   // inactive shells are excluded from assembly (element removal)
-            S.elems.push_back(std::make_unique<MITC4ShellElement>((int)s));
+            S.elems.push_back(makeShellElem((int)s));
 
     for (auto& el : S.elems) {
         std::string ewhy;
@@ -155,16 +156,7 @@ PreparedSystem assembleAndFactor(const FrameModel& model, const SolveOptions& op
     if (S.nf == 0) { S.singular = true; S.diagnostic = "fully constrained (no free DOF)"; return ps; }
 
     // reduced K_ff (free-free block; independent of prescribed values)
-    std::vector<Triplet> ftrips;
-    for (int c = 0; c < N; ++c)
-        for (SpMat::InnerIterator it(S.K, c); it; ++it) {
-            const int r = it.row();
-            if (S.fmap[r] < 0) continue;
-            if (S.fmap[c] >= 0) ftrips.emplace_back(S.fmap[r], S.fmap[c], it.value());
-        }
-    SpMat Kff(S.nf, S.nf);
-    Kff.setFromTriplets(ftrips.begin(), ftrips.end());
-    Kff.makeCompressed();
+    const SpMat Kff = reduceFF(S.K, S.fmap, S.nf);
 
     // factor + mechanism detection (from the factorization, never from connectivity)
     S.ldlt.compute(Kff);

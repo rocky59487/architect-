@@ -21,8 +21,6 @@ bool FFrameCoreSparseBucklingTest::RunTest(const FString& /*Parameters*/)
     Section  sec = Section::Rectangular(60.0, 100.0);     // Iy != Iz -> non-degenerate modes
     const double Ibuck = FMath::Min(sec.Iy, sec.Iz);
     const real   L = 3000.0, Pref = 1000.0;
-    const double kPi = 3.14159265358979323846;
-
     FrameModel m; fixtures::simplySupportedBeamN(m, 10, L, mat, sec);
     NodalLoad nl; nl.node = 10; nl.comp[Ux] = -Pref; m.nodalLoads = { nl };
     PreparedSystem ps = assembleAndFactor(m);
