@@ -47,12 +47,12 @@ OpenSees strict)。
 | **S2** | N4 動量繼承連續動力倒塌(Ritz 基底 + 碎塊帶初速 Chaos 交接) | ✅ [S2](specs/S2_dynamic_collapse.md) | **N4 跨事件繼承(主打)** |
 | **S3** | P-Delta 二階(N3 凍結分解 + Wilson 參考,雙路徑互鎖) | ✅ [S3](specs/S3_pdelta.md) | N3 架構整合 |
 | **S4** | Tension-only 桿件(ReSolve 內迴圈) | ✅ [S4](specs/S4_tension_only.md) | — |
-| **S5** | FSD 尺寸優化(stress-ratio;初版無 LTB,誠實標) | 🔶 [骨架](specs/S5_S11_skeletons.md) | — |
-| **S6** | GH 對接 MVP:CLI 橋 → daemon 模式 → C API | 🔶 骨架 | — |
-| **S7** | BESO 拓撲優化 + **N2 倒塌韌性約束版** | 🔶 骨架 | N2 方法整合 |
-| **S8** | 殼:QM6 opt-in 膜 → DKQ 薄板快路 | 🔶 骨架 | — |
-| **S9** | Co-rotational 幾何非線性(elastica oracle 已備) | 🔶 骨架 | — |
-| **S10** | N-M 互動塑鉸(選做) | 🔶 骨架 | — |
+| **S5** | FSD 尺寸優化(stress-ratio;初版無 LTB,誠實標) | ✅ [PROGRESS](PROGRESS_S7.md) | — |
+| **S6** | GH 對接 MVP:CLI 橋 → daemon 模式 → C API | ✅ J1/J1b/J1.5/J2 | — |
+| **S7** | BESO 拓撲優化 + **N2 倒塌韌性約束版** | ✅ [S7](PROGRESS_S7.md) | N2 方法整合 |
+| **S8** | 殼:QM6 opt-in 膜 → DKQ 薄板快路 | ✅ [S8](specs/S8_shell.md) | — |
+| **S9** | Co-rotational 幾何非線性(S9/S9b/S9c) | ✅ [S9c](PROGRESS_S9c.md) | — |
+| **S10** | N-M 互動塑鉸(選做) | ✅ [S10](specs/S10_nm_interaction.md) | — |
 | **S11** | MITC9i 高階殼(殿後) | 🔶 骨架 | — |
 
 **並行線(不佔主線編號)**:C6–C8 可視化資料(S3–S4 間)、生態系(S6 後)、UE 視覺層 U1–U21(S6 後)。
@@ -232,12 +232,13 @@ S9 (CR) ───► S10 (N-M 塑鉸,必在 CR 後;R4 方向耦合)
   α=10→0.8106090249,雙容差十位一致)+ OpenSees corotCrdTransf。
 - **依據**:[WS_F](research/WS_F_corot.md);與塑鉸方向耦合(R4)→ **S10 必在 S9 後**。
 
-### S10 — N-M 互動塑鉸(選做)🔶
+### S10 — N-M 互動塑鉸(選做)✅ [規格](specs/S10_nm_interaction.md) / [進度](PROGRESS_S10.md)
 
-- **目標**:G1 路線 `Mp_eff = Mp·f(N/Np)`(AISC/EC3 互動式);與既有 event-to-event 塑鉸銜接 = 觸發式 `|M| ≥ Mp_eff(N)`。
-  **排除** G2 彈簧 / G3 纖維(理由見 WS_G);無卸載(誠實:仍 sequential linear)。
-- **依賴**:S9(CR;R4 方向耦合)。
-- **Oracle**:互動面解析點 + OpenSees 對照。
+- **已完成**:G1 路線 `Mp_eff(N) = Mp·max(0,1−(N/Ny)²)`(矩形精確 EC3 §6.2.9 / 圓形保守);`CollapseOptions::nmInteraction`
+  opt-in,觸發式 `|M| ≥ Mp_eff(N)`、residual `±Mp_eff` 凍結於形成;預設 off 逐位元同 stage-4b。
+  **排除** G2 彈簧 / G3 纖維(WS_G);無卸載/反轉/N-M 切線(誠實:仍 sequential linear,非真彈塑性)。
+- **依賴**:S9(CR;R4 方向耦合 — 本實作塑鉸在局部端力座標,與大轉動正交,故 S9 後可獨立銜接)。
+- **Oracle**:F54(公式 rel 0 + 矩形一次原理 rel 0 + 懸臂括弧 on/off 決定性)+ audit +3 + UE +1。五腿全綠。
 - **依據**:[WS_G](research/WS_G_matnl.md)。
 
 ### S11 — MITC9i 高階殼(殿後)🔶

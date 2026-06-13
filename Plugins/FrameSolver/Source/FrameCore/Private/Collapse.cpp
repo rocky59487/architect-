@@ -6,6 +6,7 @@
 #include "FrameCore/FrameSolver.h"
 #include "FrameCore/ElasticAllowable.h"
 #include "FrameCore/MemberGeometry.h"
+#include "FrameCore/NMInteraction.h"
 
 #include <algorithm>
 #include <cmath>
@@ -229,15 +230,27 @@ CollapseHistory runProgressiveCollapse(const FrameModel& model, const CollapseOp
             if (!hingeCapable) {
                 consider(Event{ d.risk, 0, mem.id, 0, 0, d.mode, d.risk > opts.removeThreshold });
             } else {
-                // ductile bending: hinge candidates per end/axis at |M|/Mp >= 1
+                // ductile bending: hinge candidates per end/axis at |M|/Mp >= 1. With N-M
+                // interaction (S10) the threshold AND the residual use the axially-reduced
+                // Mp_eff(N) = Mp*(1-(N/Ny)^2) evaluated at THIS step's end axial force; once a
+                // hinge actually forms its residual is stored in PlasticHinge.Mp and frozen
+                // (the released end then recovers M = 0, so it is never re-evaluated). Without
+                // the flag N is fed as 0 -> Mp_eff == Mp, bit-for-bit the stage-4b behaviour.
                 const real MpY = mat.fy * sec.Zy, MpZ = mat.fy * sec.Zz;
-                const real Ms[4]  = { mf.endI.My, mf.endI.Mz, mf.endJ.My, mf.endJ.Mz };
-                const int  dofs[4] = { 4, 5, 10, 11 };
-                const real Mps[4] = { MpY, MpZ, MpY, MpZ };
+                const real Ny  = mat.fy * sec.A;
+                const real Ni  = opts.nmInteraction ? mf.endI.N : real(0);
+                const real Nj  = opts.nmInteraction ? mf.endJ.N : real(0);
+                const real Ms[4]   = { mf.endI.My, mf.endI.Mz, mf.endJ.My, mf.endJ.Mz };
+                const int  dofs[4]  = { 4, 5, 10, 11 };
+                const real Mp0[4]   = { MpY, MpZ, MpY, MpZ };
+                const real Naxe[4]  = { Ni, Ni, Nj, Nj };   // end-matched axial force per dof
                 for (int k = 0; k < 4; ++k) {
-                    const real ratio = std::fabs(Ms[k]) / Mps[k];
+                    const real Mpk = reducedPlasticMoment(Mp0[k], Naxe[k], Ny);
+                    if (!(Mpk > 0)) continue;   // axial-squashed: no ductile bending capacity
+                                                // left -- the brittle axial screen below governs
+                    const real ratio = std::fabs(Ms[k]) / Mpk;
                     consider(Event{ ratio, 2, mem.id, dofs[k],
-                                    (Ms[k] >= 0 ? Mps[k] : -Mps[k]), FailMode::Bending,
+                                    (Ms[k] >= 0 ? Mpk : -Mpk), FailMode::Bending,
                                     ratio >= 1.0 });
                 }
                 // brittle remainder: the SEPARABLE ratios -- pure axial (N/A, free of the

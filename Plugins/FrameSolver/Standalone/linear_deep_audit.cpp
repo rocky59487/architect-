@@ -15,6 +15,7 @@
 #include "FrameCore/ElasticAllowable.h"
 #include "FrameCore/Connectivity.h"
 #include "FrameCore/Collapse.h"
+#include "FrameCore/NMInteraction.h"
 #include "FrameTestFixtures.h"
 #include "MITC4ShellElement.h"   // Private seam: element + Eigen types for the element-level audit
 #include "PreparedSystemImpl.h"  // S2: assembled K + free map + prepared elements (mass)
@@ -1313,6 +1314,81 @@ void testHingeDriverCompat() {
     }
 }
 
+void testNMInteraction() {
+    // S10 N-M interaction (CollapseOptions::nmInteraction). Three independent invariants:
+    //  (a) the reduced-moment formula equals the first-principles rectangular plastic envelope
+    //      M_N = Mp - N^2/(4 b fy) (neutral-axis shift), to machine precision;
+    //  (b) nmInteraction=false is a strict no-op: bit-identical collapse history to the
+    //      stage-4b driver on a hinge-capable model carrying axial force (N fed as 0);
+    //  (c) the axial reduction is DECISIVE: at a load that is sub-Mp but super-Mp_eff, N-M off
+    //      stays Stable while N-M on forms the hinge mechanism (Collapsed).
+    Material mat(210000.0, 80769.0, 7850.0);
+    mat.fy = 300.0;
+    mat.cap = Capacity::make(300.0, 300.0, 180.0);
+    const real b = 80.0, d = 120.0;
+    Section sec = Section::Rectangular(b, d);
+    const real MpZ = mat.fy * sec.Zz;
+    const real Ny  = mat.fy * sec.A;
+
+    {   // (a) rectangular exactness vs neutral-axis first principles
+        const real N = 0.37 * Ny;
+        const real Mexact = MpZ - N * N / (4.0 * b * mat.fy);
+        const real got = reducedPlasticMoment(MpZ, N, Ny);
+        addRow("N-M interaction", "Mp_eff matches the rectangular plastic envelope",
+               "neutral-axis shift M_N = Mp - N^2/(4 b fy) (EC3 6.2.9 solid rectangle)",
+               "relative error", relErr(got, Mexact), 1e-12, relErr(got, Mexact) < 1e-12);
+    }
+
+    // Determinate X-cantilever (base Mz = w L^2/2, axial = tip P, both stiffness-independent).
+    const real L = 2000.0;
+    const real P = 0.5 * Ny;                            // Mp_eff(P) = 0.75 MpZ
+    const real MpEff = reducedPlasticMoment(MpZ, P, Ny);
+    const real wStar = 2.0 * MpEff / (L * L);
+    auto buildCant = [&](FrameModel& m, real w, real axial) {
+        m = FrameModel{};
+        m.materials = { mat }; m.sections = { sec };
+        Node n0(0, 0, 0, 0); n0.fixAll();
+        m.nodes = { n0, Node(1, L, 0, 0) };
+        m.members = { Member(0, 0, 1, 0, 0) };
+        MemberUDL u; u.member = 0; u.w_local = { 0.0, -w, 0.0 };
+        m.memberUDLs = { u };
+        NodalLoad p; p.node = 1; p.comp[Ux] = -axial;
+        m.nodalLoads = { p };
+    };
+
+    {   // (b) nmInteraction=false is bit-identical to stage-4b on an axially-loaded model
+        FrameModel mOld; buildCant(mOld, 1.01 * wStar, P);
+        FrameModel mNew = mOld;
+        CollapseOptions base; base.dlf = 1.0; base.plasticHinges = true;   // stage-4b, no flag
+        CollapseOptions noNM = base; noNM.nmInteraction = false;           // explicit false
+        const CollapseHistory hOld = runProgressiveCollapse(mOld, base);
+        const CollapseHistory hNew = runProgressiveCollapse(mNew, noNM);
+        bool same = hOld.outcome == hNew.outcome && hOld.steps.size() == hNew.steps.size();
+        if (same)
+            for (size_t s = 0; s < hOld.steps.size(); ++s)
+                same = same && hOld.steps[s].formedHinges.size() == hNew.steps[s].formedHinges.size() &&
+                       hOld.steps[s].maxDC == hNew.steps[s].maxDC &&
+                       hOld.steps[s].triggerRatio == hNew.steps[s].triggerRatio;
+        addRow("N-M interaction", "nmInteraction=false is a strict no-op (N fed as 0)",
+               "axially-loaded cantilever: explicit-false history == stage-4b history (bit-exact)",
+               "histories identical (want 1)", same ? 1.0 : 0.0, 0.0, same);
+    }
+
+    {   // (c) the axial reduction is decisive at a sub-Mp / super-Mp_eff load
+        FrameModel mOn;  buildCant(mOn,  1.01 * wStar, P);
+        FrameModel mOff; buildCant(mOff, 1.01 * wStar, P);
+        CollapseOptions on;  on.dlf  = 1.0; on.plasticHinges  = true; on.nmInteraction  = true;
+        CollapseOptions off; off.dlf = 1.0; off.plasticHinges = true; off.nmInteraction = false;
+        const CollapseHistory hOn  = runProgressiveCollapse(mOn,  on);
+        const CollapseHistory hOff = runProgressiveCollapse(mOff, off);
+        const bool decisive = hOn.outcome == CollapseOutcome::Collapsed &&
+                              hOff.outcome == CollapseOutcome::Stable;
+        addRow("N-M interaction", "axial interaction is decisive at sub-Mp / super-Mp_eff load",
+               "same load: N-M on -> hinge mechanism (Collapsed), N-M off -> Stable",
+               "on=Collapsed & off=Stable (want 1)", decisive ? 1.0 : 0.0, 0.0, decisive);
+    }
+}
+
 void testSafetyAndMargin() {
     // C3 safety factor + C4 criticality (pivot) margin. A cantilever (root moment PL) has the
     // closed-form worst utilization D/C = (PL/W)/cap.bend and safety factor 1/(D/C). pivotMargin
@@ -2085,6 +2161,7 @@ int main() {
     testShellFailureScreen();
     testPlasticHingeMechanics();
     testHingeDriverCompat();
+    testNMInteraction();
     testSafetyAndMargin();
     testReanalysis();
     testDynamicCollapse();

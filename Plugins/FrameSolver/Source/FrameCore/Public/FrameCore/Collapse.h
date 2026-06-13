@@ -42,6 +42,19 @@ struct CollapseOptions {
     // uniaxial Mp, no N-M interaction.
     bool plasticHinges = false;
 
+    // N-M interaction for the plastic hinges above (stage 4b / S10). Only meaningful when
+    // plasticHinges == true. When set, each end's hinge threshold and the residual moment it
+    // carries use the AXIALLY-REDUCED plastic moment Mp_eff(N) = fy*Z * max(0,1-(N/Ny)^2),
+    // Ny = fy*A (reducedPlasticMoment, NMInteraction.h) -- a hinge forms earlier under axial
+    // load. Default false -> fixed Mp = fy*Z, bit-for-bit identical to the stage-4b behaviour
+    // (N is fed as 0 -> no reduction). Honest boundary: RECTANGULAR is exact (the textbook
+    // plastic N-M envelope, EC3 EN1993-1-1 sec 6.2.9; AISC H1.1 is a more conservative bilinear
+    // design check, NOT this envelope), CIRCULAR is conservative; Mp_eff is FROZEN at formation
+    // (the released end then recovers M = 0, so later steps never re-reduce it); UNIAXIAL N
+    // reduction only, NOT My-Mz biaxial coupling; sequential linear analysis, NOT true
+    // elastoplasticity (no unloading, no N-M tangent coupling).
+    bool nmInteraction = false;
+
     SolveOptions solve;   // pivotTol / enableReleases / useTimoshenko passthrough
 };
 

@@ -19,6 +19,7 @@
 #include "FrameCore/TensionOnly.h"
 #include "FrameCore/SizeOpt.h"
 #include "FrameCore/Topology.h"
+#include "FrameCore/NMInteraction.h"
 #include "FrameCore/MemberGeometry.h"
 #include "FrameTestFixtures.h"
 
@@ -2851,6 +2852,90 @@ int main() {
             checkTrue("F53c consistent-tangent both converged", cMain && cFD, "");
             checkClose("F53c FD tangent same limit load as main-term", peakFD, peakMain, 1e-3);
         }
+    }
+
+    // ---------- F54: S10 N-M interaction plastic hinge (axially-reduced Mp_eff) ----------
+    {
+        std::printf("[F54] S10: N-M interaction plastic hinge (Mp_eff = Mp*(1-(N/Ny)^2))\n");
+        Material mat(210000.0, 80769.0, 7850.0);
+        mat.fy = 300.0;
+        mat.cap = Capacity::make(300.0, 300.0, 180.0);
+        const real b = 80.0, d = 120.0;
+        Section sec = Section::Rectangular(b, d);          // Zz = b d^2/4, A = b d
+        const real MpZ = mat.fy * sec.Zz;                  // full plastic moment about local z
+        const real Ny  = mat.fy * sec.A;                   // axial squash load
+
+        // (1) formula: unit values + sign symmetry (|N|) + clamp beyond the squash load
+        checkClose("F54 Mp_eff(N=0) = Mp", reducedPlasticMoment(MpZ, 0.0, Ny), MpZ, 1e-15);
+        checkClose("F54 Mp_eff(N=Ny/2) = 0.75 Mp", reducedPlasticMoment(MpZ, 0.5 * Ny, Ny), 0.75 * MpZ, 1e-15);
+        checkClose("F54 Mp_eff sign symmetry (|N|)", reducedPlasticMoment(MpZ, -0.5 * Ny, Ny),
+                   reducedPlasticMoment(MpZ, 0.5 * Ny, Ny), 1e-15);
+        checkClose("F54 Mp_eff(N=Ny) = 0", reducedPlasticMoment(MpZ, Ny, Ny), 0.0, 1e-15);
+        checkTrue("F54 Mp_eff clamps to 0 beyond squash (N=2Ny)",
+                  reducedPlasticMoment(MpZ, 2.0 * Ny, Ny) == 0.0);
+
+        // (2) RECTANGULAR exactness vs the first-principles plastic neutral-axis shift: a central
+        //     band of depth 2c=N/(b fy) carries the axial force, leaving M_N = Mp - N^2/(4 b fy).
+        {
+            const real N = 0.3 * Ny;
+            const real Mexact = MpZ - N * N / (4.0 * b * mat.fy);
+            checkClose("F54 rectangular Mp_eff == neutral-axis first principles",
+                       reducedPlasticMoment(MpZ, N, Ny), Mexact, 1e-12);
+        }
+
+        // (3) driver: an X-cantilever is determinate, so the base moment is w L^2/2 and the axial
+        //     force is the tip load P exactly (stiffness-independent). Under P = Ny/2 the reduced
+        //     capacity is Mp_eff = 0.75 Mp; a single base hinge turns the cantilever into a
+        //     mechanism, so the N-M hinge load is bracketed cleanly with no statical ambiguity.
+        const real L = 2000.0;
+        const real P = 0.5 * Ny;                           // -> Mp_eff(P) = 0.75 MpZ
+        const real MpEff = reducedPlasticMoment(MpZ, P, Ny);
+        const real wStar = 2.0 * MpEff / (L * L);          // base Mz = w L^2/2 reaches Mp_eff
+        auto buildCant = [&](FrameModel& m, real w) {
+            m = FrameModel{};
+            m.materials = { mat }; m.sections = { sec };
+            Node n0(0, 0.0, 0.0, 0.0); n0.fixAll();
+            m.nodes = { n0, Node(1, L, 0.0, 0.0) };
+            m.members = { Member(0, 0, 1, 0, 0) };
+            MemberUDL u; u.member = 0; u.w_local = { 0.0, -w, 0.0 };   // local-y transverse -> Mz
+            m.memberUDLs = { u };
+            NodalLoad p; p.node = 1; p.comp[Ux] = -P;                  // tip axial compression
+            m.nodalLoads = { p };
+        };
+
+        CollapseOptions on;  on.dlf  = 1.0; on.plasticHinges  = true; on.nmInteraction  = true;
+        CollapseOptions off; off.dlf = 1.0; off.plasticHinges = true; off.nmInteraction = false;
+
+        // 0.99 w*: below the reduced threshold -> Stable, no hinge
+        FrameModel mLo; buildCant(mLo, 0.99 * wStar);
+        const CollapseHistory hLo = runProgressiveCollapse(mLo, on);
+        checkTrue("F54 0.99 w* (N-M on): Stable, no hinge",
+                  hLo.outcome == CollapseOutcome::Stable && hLo.steps.size() == 1 &&
+                  hLo.steps[0].formedHinges.empty(), hLo.diagnostic);
+
+        // 1.01 w*: above the reduced threshold -> base hinge -> mechanism -> Collapsed
+        FrameModel mHi; buildCant(mHi, 1.01 * wStar);
+        const CollapseHistory hHi = runProgressiveCollapse(mHi, on);
+        checkTrue("F54 1.01 w* (N-M on): base hinge -> Collapsed",
+                  hHi.outcome == CollapseOutcome::Collapsed && hHi.steps.size() == 2 &&
+                  hHi.steps[1].formedHinges.size() == 1 && !hHi.steps[1].solved, hHi.diagnostic);
+        if (hHi.steps.size() == 2 && hHi.steps[1].formedHinges.size() == 1) {
+            checkTrue("F54 hinge at base end-i, Mz dof",
+                      hHi.steps[1].formedHinges[0].member == 0 && hHi.steps[1].formedHinges[0].dof == 5);
+            checkClose("F54 trigger ratio = |M|/Mp_eff = 1.01", hHi.steps[1].triggerRatio, 1.01, 1e-9);
+            checkClose("F54 frozen residual |Mp| = Mp_eff(P) = 0.75 Mp",
+                       std::fabs(hHi.steps[1].formedHinges[0].Mp), MpEff, 1e-9);
+        }
+
+        // contrast: the SAME 1.01 w* load with N-M OFF stays Stable (|M|/Mp = 0.7575 < 1) --
+        // the axial interaction is precisely what tips this case into collapse.
+        FrameModel mHiOff; buildCant(mHiOff, 1.01 * wStar);
+        const CollapseHistory hOff = runProgressiveCollapse(mHiOff, off);
+        checkTrue("F54 same load, N-M off: Stable (axial interaction is decisive)",
+                  hOff.outcome == CollapseOutcome::Stable && hOff.steps.size() == 1 &&
+                  hOff.steps[0].formedHinges.empty(), hOff.diagnostic);
+        std::printf("   N-M hinge load bracketed: Stable@0.99w* / Collapsed@1.01w* (N-M on); same load Stable (N-M off); Mp_eff/Mp=%.3f\n",
+                    MpEff / MpZ);
     }
 
     std::printf("\n%s  (failures=%d)\n", g_fail == 0 ? "ALL PASS" : "FAILURES", g_fail);
