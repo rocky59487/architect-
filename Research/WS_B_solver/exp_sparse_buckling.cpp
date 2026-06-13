@@ -56,8 +56,8 @@ void runCase(const char* name, const FrameModel& model, bool doDense, double lam
     SpMat Kg(S.N, S.N);
     Kg.setFromTriplets(gtrips.begin(), gtrips.end());
     Kg.makeCompressed();
-    const SpMat negKgff = reduceFF(Kg, S.fmap, S.nf, -1.0);
-    const SpMat Kff     = reduceFF(S.K, S.fmap, S.nf);
+    const SpMat negKgff = research::reduceFF(Kg, S.fmap, S.nf, -1.0);
+    const SpMat Kff     = research::reduceFF(S.K, S.fmap, S.nf);
 
     CaseResult cr;
 

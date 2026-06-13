@@ -68,7 +68,7 @@ cl %CFLAGS% /MP /c /Fo:Research\obj_core\ ^
 if errorlevel 1 ( echo [research] CORE COMPILE FAILED & popd & exit /b 1 )
 
 :exps
-set "EXPS=WS_N_incremental\exp_incremental_refactor WS_B_solver\exp_sparse_buckling WS_B_solver\exp_million_dof WS_B_solver\exp_solver_compare WS_B_solver\exp_matrix_free_operator WS_B_solver\exp_matrix_free_pcg WS_B_solver\exp_bsr6_matvec WS_B_solver\exp_framecore_bsr6_matvec WS_B_solver\exp_threaded_element_apply WS_C_pdelta\exp_pdelta_convergence WS_D_tensiononly\exp_tension_only WS_H_sizeopt\exp_size_opt WS_I_beso\exp_beso_truss WS_N_incremental\exp_dynamic_inherit"
+set "EXPS=WS_N_incremental\exp_incremental_refactor WS_B_solver\exp_sparse_buckling WS_B_solver\exp_million_dof WS_B_solver\exp_solver_compare WS_B_solver\exp_matrix_free_operator WS_B_solver\exp_matrix_free_pcg WS_B_solver\exp_bsr6_matvec WS_B_solver\exp_framecore_bsr6_matvec WS_B_solver\exp_threaded_element_apply WS_B_solver\exp_pcg_recycling WS_B_solver\exp_line_schwarz_pcg WS_B_solver\exp_parallel_pcg WS_B_solver\exp_full_apply_oracle WS_B_solver\exp_mechanism_guard_oracle WS_C_pdelta\exp_pdelta_convergence WS_D_tensiononly\exp_tension_only WS_H_sizeopt\exp_size_opt WS_I_beso\exp_beso_truss WS_N_incremental\exp_dynamic_inherit"
 
 for %%E in (%EXPS%) do (
   set "SRC=Research\%%E.cpp"

@@ -21,7 +21,7 @@ void runPreset(const char* name, int nx, int ny, int st) {
     PreparedSystem ps = assembleAndFactor(model);
     const PreparedSystem::Impl& S = *ps.impl;
     if (S.singular) { std::printf("[%s] FATAL singular\n", name); return; }
-    const SpMat Kff = reduceFF(S.K, S.fmap, S.nf);
+    const SpMat Kff = research::reduceFF(S.K, S.fmap, S.nf);
     const VecX  Fff = reduceVec(nodalLoadVector(model), S.fmap, S.nf);
     std::printf("[case] %s nf=%d nnz=%lld\n", name, S.nf, static_cast<long long>(Kff.nonZeros()));
 
