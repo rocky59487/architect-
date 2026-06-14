@@ -67,6 +67,19 @@ batch speedup over a reused prefactored LDLT reaches **10.2× at 4000 frames and
 toward the ~15× per-frame ratio** (the asymptote, not a guaranteed batch number), at
 effectively-exact accuracy.
 
+**Real point-load contacts, not just synthetic modes.** The table above used a synthetic load
+family that is in-subspace by construction (every frame is a smooth combo of the same modes it
+seeds). A follow-up validation with real game-engine loads — constant gravity plus *moving
+sparse contact point loads* (`--gameLoad`) — confirms the lane on loads that are not pre-arranged
+to fit: contacts on the seeded node set converge in **0 PCG iterations** (initialRel ~1e-10, vs
+LDLT 2e-12), and contacts that leave the seeded set raise the projection residual by 8–9 orders
+(the gate's basis). Counting the per-frame Galerkin projection honestly
+(`perFrameSpeedupWithProj`), the real lane is **~19× per frame** — the same as the synthetic
+estimate once projection is included in *both* — because the larger contact-seed count cancels
+its 0-iteration advantage. Its bigger one-time seed (one solve per contact) means the batch
+ratio trails the synthetic one until ~tens of thousands of frames. See `HPFEM_RESEARCH_NOTES.md`
+(Session 3) and `validate_subspace.py`.
+
 ## 4. Validated micro-architecture wins (pinned, 7-rep interleaved)
 
 `--parallelPrecond` + `--coarseSolve banded` cut the preconditioner apply ~24 % and improve
@@ -135,6 +148,13 @@ and (c) very large problems where the LDLT factor is prohibitive.
   equivalent-load reactions and tower prescribed reactions vs the assembled `solveLoad` oracle.
 * `exp_mechanism_guard_oracle` (4/4): under-constrained / release-condensation / isolated-node
   singular cases the HP lane must defer to the LDLT pivot guard.
+* `validate_subspace.py` (third-party numpy, no FrameCore/Eigen): independently re-derives the
+  point-load subspace identity — in-subspace projection residual ~1e-14, out-of-subspace ~1, and
+  `VᵀKV = I` (so the cheap Euclidean projection equals the Galerkin-optimal one) — confirming the
+  methodology in a separate implementation.
+* `--gameLoad` real-contact family: in-frames 0 iter / initialRel ~1e-10, out-frames initialRel
+  ~4e-2 / baseline iters, all vs LDLT ~2–4e-12; a dense `--gameVerify` path cross-checks
+  `initialGuess` against the Galerkin-optimal `V(VᵀKV)⁻¹Vᵀb` (crossRel ~2e-15).
 * In-solver gates per run: `applyRel ≤ 1e-10` (matrix-free vs assembled), `maxCombinedVsLdlt ≤
   1e-6` and `maxCombinedTrueRel ≤ 1e-8` (every HP solution vs the LDLT solution and true
   residual), banded one-time self-check (`Kc · solve(probe) ≈ probe`, dense fallback if it

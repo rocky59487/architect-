@@ -332,3 +332,88 @@ LDLT-referenced `ok` gates were all verified correct. The deflation negative res
 honestly supported (maxDeflVsLdlt 2e-12 proves the deflated solution equals LDLT). Minor
 notes addressed: the apply/banded self-check probes are now mixed-frequency + sign-
 alternating instead of a single smooth sine.
+
+## 2026-06-14 Session 3: real game-engine point-load validation
+
+The headline seeded result above was measured on a SYNTHETIC load family: makeRhsFamily's
+every frame is a smooth sinusoidal combination of the SAME 5 building modes
+(base/windX/windY/liveZ/torsion) that the seed step solves, so every frame is in-subspace
+BY CONSTRUCTION. That is circular -- it proves the basis reproduces the basis. This session
+validates the seeded lane on a REAL game-engine load family instead -- constant gravity plus
+a few MOVING sparse contact point loads -- and checks whether the projection-residual gate
+detects loads that leave the seeded subspace.
+
+### Method (makeGameLoadFamily, opt-in `--gameLoad`, default off)
+
+* loadModes (seed) = { gravity } U { the -Z unit response of each in-candidate contact
+  node }. sequence (per frame) = gravity + `active` moving contact point loads. Contact
+  nodes/strengths come from a stateless Knuth hash (reproducible; no rand/time).
+* Math: a load that only pushes on node set P has its solution in span{K^-1 e_p : p in P}.
+  So a frame is in-subspace iff all its contacts sit on seeded nodes. `--gameOutFraction p`
+  routes a fraction p of frames onto NON-seeded nodes (out-candidates, disjoint from the
+  seeded set) to exercise the gate. Three regimes: R1 p=0, R2 p=0.5, R3 p=1.
+* basisMax auto-raised to seedModes (=candidates+1) so RecycleBasis's FIFO eviction cannot
+  silently drop early seeds (basisAccepted==seedModes==13, basisRejected=0 verified).
+
+### Results (xxl nf=18720, 16T, parallel precond + banded coarse; small for correctness)
+
+R1 (contacts all seeded): each frame converges in **0 PCG iter** (initialRel 9.66e-11 <
+tol), solution vs LDLT 2.1e-12. A dense second-path cross-check (`--gameVerify`) confirms
+the basis is K-orthonormal (||VtKV - I|| = 3.4e-15) and that the cheap Euclidean
+initialGuess equals the Galerkin-optimal V(VtKV)^-1 Vt b (crossRel 2.4e-15).
+
+R3 (contacts all non-seeded): initialRel 4.1e-2 -- EIGHT orders of magnitude above R1's
+9.7e-11 -- and iterations return to baseline (~335 vs serial 349). The solution is still
+correct (vs LDLT 4.1e-12): a bad initial guess costs only speed, never accuracy. This is
+the gate's justification -- a 1e-6 threshold on initialRel cleanly separates in/out.
+(initialRel is 4e-2, not 1.0, because gravity dominates ||b|| and is recovered exactly; the
+residual is the un-projected contact part -- a real, honest physical dilution.)
+
+R2 (half out): in-frames 9.6e-11 / 0 iter, out-frames 3.8e-2 / ~335 iter -- a clean split.
+
+### HONEST per-frame cost: projection is NOT free (adversarial-review correction)
+
+pcg's combinedMs does NOT time the Galerkin projection that basis.initialGuess does every
+frame (it lives in projectMs). The meaningful per-frame cost is combinedMsAvg + projectMsAvg.
+With that correction (new outputs `perFrameMsWithProj` / `perFrameSpeedupWithProj`):
+
+| family | combinedMsAvg | projectMsAvg | per-frame (with proj) | per-frame speedup vs reused LDLT |
+| --- | --- | --- | --- | --- |
+| game (k=17) | 0.339 | 0.212 | 0.550 | **19.5x** |
+| synthetic (k=5) | 0.473 | 0.071 | 0.544 | 19.7x |
+
+So the real-load lane is ~19x per frame -- the SAME as synthetic, not faster. The game
+lane's 0-iter advantage (vs synthetic's ~0.44 iter) is cancelled by its larger k=17
+projection (more seeded contacts). The naive combinedMsAvg-only ratio (~31x for game)
+OVERSTATES the win; the same projection cost applies to the synthetic headline above too.
+
+### Seed-dimension cost and the batch crossover
+
+Real loads need one seed per contact candidate, so seedMs is ~4500 ms (16 contacts) vs
+~1300 ms (5 synthetic modes). The one-time seed amortizes more slowly: factor_bypass_batch_
+speedup at 4000 frames is ~7.4x (game) vs ~10-13x (synthetic, single-run noisy). Per-frame
+they are equal, so the game lane overtakes only after the extra seed cost amortizes --
+crossover ~24000 frames (~3247 ms extra seed / ~0.13 ms per-frame saving). For a real
+multi-thousand-frame session both sit at the ~19x per-frame asymptote; the batch number
+just trails until the larger seed pays off.
+
+### Validation & honesty
+
+* Third-party numpy check (`validate_subspace.py`, no FrameCore/Eigen): independently
+  re-derives R1 in-subspace residual ~1e-14, R3 out-of-subspace ~1.1, and VtKV=I (so the
+  Euclidean projection equals the Galerkin one). Methodology confirmed in a separate impl.
+* Regression: with `--gameLoad` off the synthetic path is unchanged (seedCount=5, vsLdlt
+  2e-12). All new flags default off.
+* Adversarial read-only review raised three points, all addressed: (1) projection cost now
+  reported (above); (2) out/in-candidate overlap guarded with a loud warning when
+  nFree < 2*cand; (3) `--gameAddHorizontal` deliberately leaves the -Z seed span (a
+  controlled perturbation) -- documented, and the 0-iter claim is the pure -Z default only.
+
+### Takeaway for production (task A)
+
+Real low-dimensional game loads DO ride the seeded lane (~19x/frame, gate reliable), but
+the win EQUALS the synthetic estimate rather than exceeding it, and the seeded subspace must
+cover the actual contact set. The production fallback should key on the projection-residual
+gate: in vs out initialRel differ by 8-9 orders, so a 1e-6 threshold separates them with
+wide margin; out-of-subspace frames fall back to ordinary PCG (still correct, baseline cost)
+or LDLT.

@@ -12,6 +12,7 @@
 #include <array>
 #include <cmath>
 #include <condition_variable>
+#include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -45,6 +46,15 @@ struct Args {
     bool symApply = false;            // store only the lower triangle of each element block
     int towerNx = 0, towerNy = 0, towerStories = 0;  // override tower dims for scaling sweeps
     bool noSerialBaseline = false;    // skip the per-RHS serial PCG reference (large-batch sweeps)
+    // Real game-engine load family (default off = original synthetic family). Validates the
+    // seeded lane under gravity + moving sparse contact point loads instead of a smooth combo
+    // of the same modes it seeds. See makeGameLoadFamily.
+    bool gameLoad = false;
+    int gameContactCandidates = 12;   // seedable contact nodes (the in-subspace set)
+    int gameContactActive = 2;        // active contacts per frame
+    double gameOutFraction = 0.0;     // [0,1] fraction of frames whose contacts leave the seed span
+    bool gameAddHorizontal = false;   // add a small Ux/Uy component to contacts
+    bool gameVerify = false;          // dense V (VtKV)^-1 Vt b cross-check of initialGuess (small cases)
 };
 
 Args parseArgs(int argc, char** argv) {
@@ -71,6 +81,12 @@ Args parseArgs(int argc, char** argv) {
         else if (!std::strcmp(argv[i], "--towerNy")) a.towerNy = std::max(0, std::atoi(next()));
         else if (!std::strcmp(argv[i], "--towerStories")) a.towerStories = std::max(0, std::atoi(next()));
         else if (!std::strcmp(argv[i], "--noSerialBaseline")) a.noSerialBaseline = true;
+        else if (!std::strcmp(argv[i], "--gameLoad")) a.gameLoad = true;
+        else if (!std::strcmp(argv[i], "--gameContactCandidates")) a.gameContactCandidates = std::max(1, std::atoi(next()));
+        else if (!std::strcmp(argv[i], "--gameContactActive")) a.gameContactActive = std::max(1, std::atoi(next()));
+        else if (!std::strcmp(argv[i], "--gameOutFraction")) a.gameOutFraction = std::min(1.0, std::max(0.0, std::atof(next())));
+        else if (!std::strcmp(argv[i], "--gameAddHorizontal")) a.gameAddHorizontal = true;
+        else if (!std::strcmp(argv[i], "--gameVerify")) a.gameVerify = true;
     }
     if (a.preset != "xxl") a.preset = "small";
     return a;
@@ -870,6 +886,7 @@ PcgStats pcg(const ElementOperator& A, const Preconditioner& P, const SpMat& Kff
 struct RhsFamily {
     std::vector<VecX> sequence;
     std::vector<VecX> loadModes;
+    std::vector<char> isOutFrame;  // per-frame: contacts left the seed span (gameLoad only)
 };
 
 RhsFamily makeRhsFamily(const FrameModel& model, const PreparedSystem::Impl& S,
@@ -927,6 +944,113 @@ RhsFamily makeRhsFamily(const FrameModel& model, const PreparedSystem::Impl& S,
         b.noalias() += (0.20 + 0.15 * std::sin(0.17 * t + 1.1)) * liveZ;
         b.noalias() += (0.25 * std::sin(0.41 * t)) * torsion;
         out.sequence.push_back(std::move(b));
+    }
+    return out;
+}
+
+// Real game-engine load family: constant gravity + a few MOVING sparse contact point
+// loads. makeRhsFamily above is "honest cheating": every frame is a smooth sinusoidal
+// combo of the SAME 5 modes it seeds, so every frame is in-subspace by construction.
+// A real game re-solves a fixed structure each frame under gravity (constant) plus a
+// handful of contact point loads whose LOCATIONS move. The seed basis here is
+// { gravity } U { unit -Z response of each in-candidate contact node }. A frame is
+// in-subspace iff all its contacts sit on seeded nodes (its solution is then a linear
+// combo of seeded responses -> Galerkin-exact initial guess). `outFraction` of the
+// frames deliberately place contacts on NON-seeded nodes, so the projection residual
+// jumps -> exercises the gate. All randomness is a stateless Knuth hash (reproducible;
+// no rand/time, so artifacts reproduce bit-for-bit).
+RhsFamily makeGameLoadFamily(const FrameModel& model, const PreparedSystem::Impl& S,
+                             const VecX& base, int count, int candidates, int active,
+                             double outFraction, bool addHorizontal) {
+    RhsFamily out;
+    out.sequence.reserve(static_cast<size_t>(count));
+    out.isOutFrame.reserve(static_cast<size_t>(count));
+
+    auto hash32 = [](std::uint32_t x) -> std::uint32_t {
+        x *= 2654435761u; x ^= x >> 16; x *= 0x45d9f3bu; x ^= x >> 16; return x;
+    };
+    auto frameHash = [&](int frame, int slot) -> std::uint32_t {
+        return hash32(static_cast<std::uint32_t>(frame) * 2654435761u +
+                      static_cast<std::uint32_t>(slot) * 40503u + 0x9e3779b9u);
+    };
+
+    // Nodes that own a FREE vertical DOF. The fixed base layer (k=0 fixAll) is excluded
+    // automatically because its Uz maps to fmap < 0. node index == node id (makeTower
+    // pushes nodes in towerNodeId order).
+    std::vector<int> freeZNodes;
+    freeZNodes.reserve(model.nodes.size());
+    for (size_t ni = 0; ni < model.nodes.size(); ++ni)
+        if (S.fmap[static_cast<size_t>(gdof(static_cast<int>(ni), Uz))] >= 0)
+            freeZNodes.push_back(static_cast<int>(ni));
+
+    // in-candidates (seeded) come from the mid-region of the free-Z nodes (a character's
+    // activity floors, not the base); out-candidates are a disjoint free set used only by
+    // out-of-subspace frames.
+    const int nFree = static_cast<int>(freeZNodes.size());
+    const int cand = std::max(1, std::min(candidates, std::max(1, nFree / 2)));
+    const int inStart = std::min(std::max(0, nFree / 4), std::max(0, nFree - 2 * cand));
+    std::vector<int> inNodes, outNodes;
+    for (int t = 0; t < cand; ++t) inNodes.push_back(freeZNodes[static_cast<size_t>(inStart + t)]);
+    for (int t = 0; t < cand; ++t) {
+        const int idx = inStart + cand + t;
+        outNodes.push_back(freeZNodes[static_cast<size_t>(idx < nFree ? idx : (idx % nFree))]);
+    }
+    // Out-candidates must stay disjoint from in-candidates, else "out-of-subspace" frames
+    // would secretly land on seeded nodes and R3's residual would be falsely small. This
+    // needs >= 2*cand distinct free-Z nodes; warn loudly rather than mislead silently.
+    if (nFree < 2 * cand)
+        std::fprintf(stderr, "[gameload] WARNING: only %d free-Z nodes for in+out = 2x%d; "
+                     "out-candidates overlap in-candidates -> R3 out-of-subspace is INVALID\n",
+                     nFree, cand);
+
+    // Fixed, height-independent magnitude keeps every seed response of similar norm so
+    // the K-orthonormal Gram-Schmidt stays well-conditioned.
+    constexpr real kContactZ = real(5.0e4);
+    constexpr real kContactH = real(5.0e3);
+
+    auto addPoint = [&](VecX& b, int nodeId, real fz, real fx, real fy) {
+        const int dz = S.fmap[static_cast<size_t>(gdof(nodeId, Uz))];
+        if (dz >= 0) b(dz) += fz;
+        if (addHorizontal) {
+            const int dx = S.fmap[static_cast<size_t>(gdof(nodeId, Ux))];
+            const int dy = S.fmap[static_cast<size_t>(gdof(nodeId, Uy))];
+            if (dx >= 0) b(dx) += fx;
+            if (dy >= 0) b(dy) += fy;
+        }
+    };
+
+    // The seed basis spans gravity + the -Z unit response of each in-candidate. It does
+    // NOT include horizontal directions, so with --gameAddHorizontal each frame's Ux/Uy
+    // component lies OUTSIDE the seed span by design (a controlled perturbation): in that
+    // mode even in-frames carry a small non-zero initialRel -- expected, not a bug. The
+    // 0-iter result is the pure -Z case (the default, addHorizontal=false).
+    out.loadModes.reserve(static_cast<size_t>(cand) + 1);
+    out.loadModes.push_back(base);                       // gravity response is seeded
+    for (int p = 0; p < cand; ++p) {                     // each in-candidate's unit -Z response
+        VecX e = VecX::Zero(S.nf);
+        addPoint(e, inNodes[static_cast<size_t>(p)], -kContactZ, real(0), real(0));
+        out.loadModes.push_back(std::move(e));
+    }
+
+    const int na = std::max(1, active);
+    for (int fr = 0; fr < count; ++fr) {
+        const bool isOut = (frameHash(fr, 99) % 1000u) <
+                           static_cast<std::uint32_t>(outFraction * 1000.0);
+        const std::vector<int>& poolNodes = isOut ? outNodes : inNodes;
+        VecX b = base;
+        for (int s = 0; s < na; ++s) {
+            const std::uint32_t h = frameHash(fr, s);
+            const int node = poolNodes[static_cast<size_t>(h % poolNodes.size())];
+            const real strength = real(0.5) +
+                static_cast<real>((h >> 8) & 0xFFFFu) / real(65535.0);   // [0.5, 1.5]
+            const real fx = addHorizontal
+                ? kContactH * (real(-0.5) + static_cast<real>((h >> 12) & 0xFFu) / real(255.0)) : real(0);
+            const real fy = addHorizontal
+                ? kContactH * (real(-0.5) + static_cast<real>((h >> 20) & 0xFFu) / real(255.0)) : real(0);
+            addPoint(b, node, -kContactZ * strength, fx, fy);
+        }
+        out.sequence.push_back(std::move(b));
+        out.isOutFrame.push_back(isOut ? char(1) : char(0));
     }
     return out;
 }
@@ -1339,16 +1463,30 @@ int main(int argc, char** argv) {
     }
 
     if (args.rhsCount > 1 || args.basisMax > 0) {
-        const RhsFamily rhsFamily = makeRhsFamily(model, S, Fff, args.rhsCount);
+        const RhsFamily rhsFamily = args.gameLoad
+            ? makeGameLoadFamily(model, S, Fff, args.rhsCount, args.gameContactCandidates,
+                                 args.gameContactActive, args.gameOutFraction, args.gameAddHorizontal)
+            : makeRhsFamily(model, S, Fff, args.rhsCount);
         const std::vector<VecX>& rhs = rhsFamily.sequence;
-        RecycleBasis basis(args.basisMax);
+        // Seeded game loads must keep EVERY seed response (gravity + each contact unit
+        // response). RecycleBasis evicts FIFO, so a too-small basisMax would silently drop
+        // early seeds and break the in-subspace guarantee -> auto-grow it (and report it).
+        int effBasisMax = args.basisMax;
+        if (args.gameLoad && args.seedLoadBasis &&
+            effBasisMax < static_cast<int>(rhsFamily.loadModes.size())) {
+            std::fprintf(stderr, "[gameload] note: raising basisMax %d -> %zu to fit all seed modes\n",
+                         effBasisMax, rhsFamily.loadModes.size());
+            effBasisMax = static_cast<int>(rhsFamily.loadModes.size());
+        }
+        RecycleBasis basis(effBasisMax);
         int seedIters = 0;
         int seedCount = 0;
         double seedMs = 0.0;
         double seedApplyMs = 0.0;
         double seedPrecondMs = 0.0;
         double maxSeedTrueRel = 0.0;
-        if (args.seedLoadBasis && args.basisMax > 0) {
+        double verifyOffDiag = -1.0, verifyCrossRel = -1.0;  // gameVerify dense cross-check
+        if (args.seedLoadBasis && effBasisMax > 0) {
             for (const VecX& seedRhs : rhsFamily.loadModes) {
                 if (seedRhs.norm() <= real(0)) continue;
                 // Recycle the accumulating A-orthogonal basis as the seed's initial guess so
@@ -1366,6 +1504,31 @@ int main(int argc, char** argv) {
                 basis.add(xSeed, [&](const VecX& x, VecX& y) { pool.apply(x, y); });
             }
         }
+
+        // Dense second-path cross-check of the cheap Euclidean initialGuess: build V from
+        // the seeded basis, form VtKV via the matrix-free apply, and compare the
+        // Galerkin-optimal V (VtKV)^-1 Vt b against initialGuess(b). verifyOffDiag is how
+        // far VtKV is from I (the precondition that makes the two equal). Small cases only.
+        if (args.gameLoad && args.gameVerify && !basis.v.empty() && !rhs.empty()) {
+            const int kdim = static_cast<int>(basis.v.size());
+            MatX V(S.nf, kdim);
+            for (int j = 0; j < kdim; ++j) V.col(j) = basis.v[static_cast<size_t>(j)];
+            MatX KV(S.nf, kdim);
+            for (int j = 0; j < kdim; ++j) {
+                VecX vj = V.col(j), kv(S.nf);
+                pool.apply(vj, kv);
+                KV.col(j) = kv;
+            }
+            const MatX VtKV = V.transpose() * KV;
+            verifyOffDiag = (VtKV - MatX::Identity(kdim, kdim)).norm();
+            const VecX& bP = rhs[0];
+            Eigen::LDLT<MatX> Ef(VtKV);
+            const VecX x0dense = V * Ef.solve(V.transpose() * bP);
+            const VecX x0fast = basis.initialGuess(S.nf, bP);
+            verifyCrossRel = (x0dense - x0fast).norm() /
+                             std::max(1e-300, static_cast<double>(x0dense.norm()));
+        }
+
         int serialIters = 0;
         int combinedIters = 0;
         int combinedItersSkip1 = 0;
@@ -1381,6 +1544,9 @@ int main(int argc, char** argv) {
         double maxCombinedInitialRel = 0.0;
         double maxCombinedVsLdlt = 0.0;
         int skipN = 0;
+        int inFrames = 0, outFrames = 0;
+        long long inIters = 0, outIters = 0;
+        double inMaxInitialRel = 0.0, outMaxInitialRel = 0.0;
 
         for (int i = 0; i < static_cast<int>(rhs.size()); ++i) {
             const VecX& b = rhs[static_cast<size_t>(i)];
@@ -1410,6 +1576,15 @@ int main(int argc, char** argv) {
             maxCombinedInitialRel = std::max(maxCombinedInitialRel, combined.initialRelResidual);
             maxCombinedTrueRel = std::max(maxCombinedTrueRel, combined.trueRel);
             maxCombinedVsLdlt = std::max(maxCombinedVsLdlt, relNorm(xCombined, xLdlt));
+            if (args.gameLoad && i < static_cast<int>(rhsFamily.isOutFrame.size())) {
+                if (rhsFamily.isOutFrame[static_cast<size_t>(i)]) {
+                    ++outFrames; outIters += combined.iters;
+                    outMaxInitialRel = std::max(outMaxInitialRel, combined.initialRelResidual);
+                } else {
+                    ++inFrames; inIters += combined.iters;
+                    inMaxInitialRel = std::max(inMaxInitialRel, combined.initialRelResidual);
+                }
+            }
             if (i > 0) {
                 combinedItersSkip1 += combined.iters;
                 ++skipN;
@@ -1449,7 +1624,7 @@ int main(int argc, char** argv) {
                     P.sparseOk ? 1 : 0, P.coarseNnz, P.bandedResidual, P.bandedOffBandRel,
                     args.coarseBinsX, args.coarseBinsY,
                     static_cast<long long>(P.coarseDim), pool.threads(), static_cast<int>(rhs.size()),
-                    args.basisMax, args.seedLoadBasis ? 1 : 0, seedCount, seedIters, seedMs, seedApplyMs,
+                    effBasisMax, args.seedLoadBasis ? 1 : 0, seedCount, seedIters, seedMs, seedApplyMs,
                     seedPrecondMs, basis.accepted, basis.rejected, S.nf, A.numBlocks(), prepMs, hpSetupMs,
                     opBuildMs, precondBuildMs, ldltSolveMsAvg,
                     factorBypassSetupSpeedup, factorBypassFirstSolveSpeedup, factorBypassBatchSpeedup,
@@ -1460,6 +1635,28 @@ int main(int argc, char** argv) {
                     serialMsAvg / std::max(1e-300, combinedMsAvg),
                     basis.projectMs / n, basis.addMs, maxCombinedInitialRel, maxSeedTrueRel, maxSerialTrueRel,
                     maxCombinedTrueRel, maxCombinedVsLdlt);
+        if (args.gameLoad) {
+            // HONEST per-frame cost INCLUDES the Galerkin projection (basis.projectMs),
+            // which pcg's combinedMs does NOT time. For the seeded game lane the k=
+            // seedModes projection is a real per-frame cost (it grows with the contact-
+            // candidate count), so the meaningful speedup vs reused LDLT is computed
+            // against combinedMsAvg + projectMsAvg, not combinedMsAvg alone.
+            const double perFrameMsWithProj = combinedMsAvg + basis.projectMs / n;
+            std::printf("[gameload_meta] gameLoad=1 candidates=%d active=%d outFraction=%.3f "
+                        "addHorizontal=%d seedModes=%zu inFrames=%d outFrames=%d "
+                        "inMaxInitialRel=%.3e outMaxInitialRel=%.3e inAvgIters=%.2f outAvgIters=%.2f "
+                        "basisAccepted=%d basisRejected=%d effBasisMax=%d "
+                        "verifyOffDiagVtKV=%.3e verifyCrossRel=%.3e "
+                        "perFrameMsWithProj=%.4f perFrameSpeedupWithProj=%.2f\n",
+                        args.gameContactCandidates, args.gameContactActive, args.gameOutFraction,
+                        args.gameAddHorizontal ? 1 : 0, rhsFamily.loadModes.size(),
+                        inFrames, outFrames, inMaxInitialRel, outMaxInitialRel,
+                        inFrames ? static_cast<double>(inIters) / inFrames : 0.0,
+                        outFrames ? static_cast<double>(outIters) / outFrames : 0.0,
+                        basis.accepted, basis.rejected, effBasisMax,
+                        verifyOffDiag, verifyCrossRel,
+                        perFrameMsWithProj, ldltSolveMsAvg / std::max(1e-300, perFrameMsWithProj));
+        }
         return ok ? 0 : 1;
     }
 
