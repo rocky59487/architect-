@@ -433,7 +433,11 @@ private:
     // floor ordering or a diagonal floor block is not SPD.
     bool buildBandedFactor(const MatX& Kc, int nc, int groupsPerLevel) {
         const int fb = groupsPerLevel * 6;
-        if (fb <= 0 || nc % fb != 0) return false;
+        // On any failure clear partial factors so the dense fallback never inherits stale
+        // floor blocks (memory hygiene; the tower is always block-tridiagonal so this path
+        // is defensive only).
+        auto bail = [this]() { coarseDfac.clear(); coarseEsub.clear(); return false; };
+        if (fb <= 0 || nc % fb != 0) return bail();
         const int L = nc / fb;
         const real ref = Kc.cwiseAbs().maxCoeff();
         const real tol = real(1e-9) * std::max<real>(real(1), ref);
@@ -443,18 +447,18 @@ private:
                 if (std::abs(i - j) > 1)
                     maxOffBand = std::max(maxOffBand, Kc.block(i * fb, j * fb, fb, fb).cwiseAbs().maxCoeff());
         bandedOffBandRel = static_cast<double>(maxOffBand / std::max<real>(real(1e-300), ref));
-        if (maxOffBand > tol) return false;  // not block-tridiagonal -> dense fallback
+        if (maxOffBand > tol) return bail();  // not block-tridiagonal -> dense fallback
         coarseDfac.assign(static_cast<size_t>(L), Eigen::LDLT<MatX>());
         coarseEsub.assign(static_cast<size_t>(L), MatX::Zero(fb, fb));
         coarseDfac[0].compute(Kc.block(0, 0, fb, fb));
-        if (coarseDfac[0].info() != Eigen::Success) return false;
+        if (coarseDfac[0].info() != Eigen::Success) return bail();
         for (int i = 1; i < L; ++i) {
             const MatX Bi = Kc.block(i * fb, (i - 1) * fb, fb, fb);  // A_{i,i-1}
             // E_i = B_i D_{i-1}^{-1};  E_i^T = D_{i-1}^{-1} B_i^T = Dfac[i-1].solve(B_i^T)
             coarseEsub[static_cast<size_t>(i)] = coarseDfac[static_cast<size_t>(i - 1)].solve(Bi.transpose()).transpose();
             const MatX Di = Kc.block(i * fb, i * fb, fb, fb) - coarseEsub[static_cast<size_t>(i)] * Bi.transpose();
             coarseDfac[static_cast<size_t>(i)].compute(Di);
-            if (coarseDfac[static_cast<size_t>(i)].info() != Eigen::Success) return false;
+            if (coarseDfac[static_cast<size_t>(i)].info() != Eigen::Success) return bail();
         }
         coarseFb = fb;
         coarseFloors = L;
@@ -1451,9 +1455,9 @@ int main(int argc, char** argv) {
         const bool ok = applyRel <= 1e-10 && D.ready && maxDeflTrueRel <= 1e-8 &&
                         maxDeflVsLdlt <= 1e-6 && maxHarvestVsLdlt <= 1e-6;
 
-        std::printf("[deflation_hpfem] preset=%s parallelPrecond=%d coarseSolve=%s bandedOk=%d threads=%d nf=%d blocks=%zu deflK=%d kept=%d window=%d harvestIters=%d harvestMs=%.3f defSetupMs=%.3f maxRitzResidual=%.3e reuseN=%d prepMs=%.3f hpSetupMs=%.3f ldltSolveMsAvg=%.3f directBatchMs=%.3f hpBatchMs=%.3f factorBypassBatchSpeedup=%.3f applyRel=%.3e plainItersAvg=%.2f deflItersAvg=%.2f speedupIters=%.3f plainMsAvg=%.3f deflMsAvg=%.3f deflApplyMsAvg=%.3f deflPrecondMsAvg=%.3f deflOtherMsAvg=%.3f speedupMs=%.3f maxDeflInitRel=%.3e maxHarvestVsLdlt=%.3e maxPlainTrueRel=%.3e maxDeflTrueRel=%.3e maxDeflVsLdlt=%.3e\n",
-                    args.preset.c_str(), args.parallelPrecond ? 1 : 0, args.coarseSolve.c_str(),
-                    P.bandedOk ? 1 : 0, pool.threads(), S.nf, A.numBlocks(), args.deflation,
+        std::printf("[deflation_hpfem] preset=%s parallelPrecond=%d symApply=%d coarseSolve=%s bandedOk=%d sparseOk=%d coarseNnz=%.0f threads=%d nf=%d blocks=%zu deflK=%d kept=%d window=%d harvestIters=%d harvestMs=%.3f defSetupMs=%.3f maxRitzResidual=%.3e reuseN=%d prepMs=%.3f hpSetupMs=%.3f ldltSolveMsAvg=%.3f directBatchMs=%.3f hpBatchMs=%.3f factorBypassBatchSpeedup=%.3f applyRel=%.3e plainItersAvg=%.2f deflItersAvg=%.2f speedupIters=%.3f plainMsAvg=%.3f deflMsAvg=%.3f deflApplyMsAvg=%.3f deflPrecondMsAvg=%.3f deflOtherMsAvg=%.3f speedupMs=%.3f maxDeflInitRel=%.3e maxHarvestVsLdlt=%.3e maxPlainTrueRel=%.3e maxDeflTrueRel=%.3e maxDeflVsLdlt=%.3e\n",
+                    args.preset.c_str(), args.parallelPrecond ? 1 : 0, args.symApply ? 1 : 0, args.coarseSolve.c_str(),
+                    P.bandedOk ? 1 : 0, P.sparseOk ? 1 : 0, P.coarseNnz, pool.threads(), S.nf, A.numBlocks(), args.deflation,
                     D.k, window, harv.iters, harvestMs, defSetupMs, D.maxRitzResidual, reuseN,
                     prepMs, hpSetupMs, ldltSolveMsAvg, directBatchMsFull, hpBatchMs,
                     factorBypassBatchSpeedup, applyRel, plainItersAvg, deflItersAvg, speedupIters,
@@ -1618,18 +1622,19 @@ int main(int argc, char** argv) {
                         maxCombinedTrueRel <= 1e-8 &&
                         maxCombinedVsLdlt <= 1e-6;
 
-        std::printf("[combined_hpfem] preset=%s precond=%s parallelPrecond=%d symApply=%d coarseSolve=%s bandedOk=%d sparseOk=%d coarseNnz=%.0f bandedResidual=%.3e bandedOffBandRel=%.3e coarseBins=%dx%d coarseDofs=%lld threads=%d rhs=%d basisMax=%d seedLoadBasis=%d seedCount=%d seedIters=%d seedMs=%.3f seedApplyMs=%.3f seedPrecondMs=%.3f basisAccepted=%d basisRejected=%d nf=%d blocks=%zu prepMs=%.3f hpSetupMs=%.3f opBuildMs=%.3f precondBuildMs=%.3f ldltSolveMsAvg=%.3f factorBypassSetupSpeedup=%.3f factorBypassFirstSolveSpeedup=%.3f factorBypassBatchSpeedup=%.3f directBatchMs=%.3f hpBatchMs=%.3f applyRel=%.3e serialItersAvg=%.2f combinedItersAvg=%.2f combinedItersSkip1Avg=%.2f speedupIters=%.3f serialMsAvg=%.3f serialApplyMsAvg=%.3f serialPrecondMsAvg=%.3f serialOtherMsAvg=%.3f combinedMsAvg=%.3f combinedApplyMsAvg=%.3f combinedPrecondMsAvg=%.3f combinedOtherMsAvg=%.3f speedupMs=%.3f projectMsAvg=%.6f basisAddMs=%.3f maxCombinedInitialRel=%.3e maxSeedTrueRel=%.3e maxSerialTrueRel=%.3e maxCombinedTrueRel=%.3e maxCombinedVsLdlt=%.3e\n",
+        std::printf("[combined_hpfem] preset=%s precond=%s parallelPrecond=%d symApply=%d coarseSolve=%s bandedOk=%d sparseOk=%d coarseNnz=%.0f bandedResidual=%.3e bandedOffBandRel=%.3e coarseBins=%dx%d coarseDofs=%lld threads=%d rhs=%d basisMax=%d seedLoadBasis=%d serialBaseline=%d seedCount=%d seedIters=%d seedMs=%.3f seedApplyMs=%.3f seedPrecondMs=%.3f basisAccepted=%d basisRejected=%d nf=%d blocks=%zu prepMs=%.3f hpSetupMs=%.3f opBuildMs=%.3f precondBuildMs=%.3f ldltSolveMsAvg=%.3f factorBypassSetupSpeedup=%.3f factorBypassFirstSolveSpeedup=%.3f factorBypassBatchSpeedup=%.3f directBatchMs=%.3f hpBatchMs=%.3f applyRel=%.3e serialItersAvg=%.2f combinedItersAvg=%.2f combinedItersSkip1Avg=%.2f speedupIters=%.3f serialMsAvg=%.3f serialApplyMsAvg=%.3f serialPrecondMsAvg=%.3f serialOtherMsAvg=%.3f combinedMsAvg=%.3f combinedApplyMsAvg=%.3f combinedPrecondMsAvg=%.3f combinedOtherMsAvg=%.3f speedupMs=%.3f projectMsAvg=%.6f basisAddMs=%.3f maxCombinedInitialRel=%.3e maxSeedTrueRel=%.3e maxSerialTrueRel=%.3e maxCombinedTrueRel=%.3e maxCombinedVsLdlt=%.3e\n",
                     args.preset.c_str(), args.precond.c_str(), args.parallelPrecond ? 1 : 0,
                     args.symApply ? 1 : 0, args.coarseSolve.c_str(), P.bandedOk ? 1 : 0,
                     P.sparseOk ? 1 : 0, P.coarseNnz, P.bandedResidual, P.bandedOffBandRel,
                     args.coarseBinsX, args.coarseBinsY,
                     static_cast<long long>(P.coarseDim), pool.threads(), static_cast<int>(rhs.size()),
-                    effBasisMax, args.seedLoadBasis ? 1 : 0, seedCount, seedIters, seedMs, seedApplyMs,
+                    effBasisMax, args.seedLoadBasis ? 1 : 0, args.noSerialBaseline ? 0 : 1,
+                    seedCount, seedIters, seedMs, seedApplyMs,
                     seedPrecondMs, basis.accepted, basis.rejected, S.nf, A.numBlocks(), prepMs, hpSetupMs,
                     opBuildMs, precondBuildMs, ldltSolveMsAvg,
                     factorBypassSetupSpeedup, factorBypassFirstSolveSpeedup, factorBypassBatchSpeedup,
                     directBatchMs, hpBatchMs, applyRel, serialItersAvg, combinedItersAvg, combinedItersSkip1Avg,
-                    serialItersAvg / std::max(1e-300, combinedItersAvg),
+                    combinedItersAvg > 0.0 ? serialItersAvg / combinedItersAvg : -1.0,
                     serialMsAvg, serialApplyMsAvg, serialPrecondMsAvg, serialOtherMsAvg,
                     combinedMsAvg, combinedApplyMsAvg, combinedPrecondMsAvg, combinedOtherMsAvg,
                     serialMsAvg / std::max(1e-300, combinedMsAvg),
@@ -1684,9 +1689,9 @@ int main(int argc, char** argv) {
     const double parallelOtherMs = parallel.ms - parallelApplyMs - parallelPrecondMs;
     const bool ok = applyRel <= 1e-10 && parallel.trueRel <= 1e-8 && pcgVsLdlt <= 1e-6;
 
-    std::printf("[parallel_pcg] preset=%s precond=%s parallelPrecond=%d coarseSolve=%s bandedOk=%d bandedResidual=%.3e bandedOffBandRel=%.3e coarseBins=%dx%d coarseDofs=%lld threads=%d nf=%d blocks=%zu prepMs=%.3f hpSetupMs=%.3f opBuildMs=%.3f precondBuildMs=%.3f ldltSolveMs=%.3f factorBypassSetupSpeedup=%.3f factorBypassFirstSolveSpeedup=%.3f directFirstMs=%.3f hpFirstMs=%.3f applyRel=%.3e serialIters=%d parallelIters=%d serialMs=%.3f serialApplyMs=%.3f serialPrecondMs=%.3f serialOtherMs=%.3f parallelMs=%.3f parallelApplyMs=%.3f parallelPrecondMs=%.3f parallelOtherMs=%.3f speedupMs=%.3f serialTrueRel=%.3e parallelTrueRel=%.3e pcgVsLdlt=%.3e\n",
+    std::printf("[parallel_pcg] preset=%s precond=%s parallelPrecond=%d symApply=%d coarseSolve=%s bandedOk=%d sparseOk=%d coarseNnz=%.0f bandedResidual=%.3e bandedOffBandRel=%.3e coarseBins=%dx%d coarseDofs=%lld threads=%d nf=%d blocks=%zu prepMs=%.3f hpSetupMs=%.3f opBuildMs=%.3f precondBuildMs=%.3f ldltSolveMs=%.3f factorBypassSetupSpeedup=%.3f factorBypassFirstSolveSpeedup=%.3f directFirstMs=%.3f hpFirstMs=%.3f applyRel=%.3e serialIters=%d parallelIters=%d serialMs=%.3f serialApplyMs=%.3f serialPrecondMs=%.3f serialOtherMs=%.3f parallelMs=%.3f parallelApplyMs=%.3f parallelPrecondMs=%.3f parallelOtherMs=%.3f speedupMs=%.3f serialTrueRel=%.3e parallelTrueRel=%.3e pcgVsLdlt=%.3e\n",
                 args.preset.c_str(), args.precond.c_str(), args.parallelPrecond ? 1 : 0,
-                args.coarseSolve.c_str(), P.bandedOk ? 1 : 0, P.bandedResidual, P.bandedOffBandRel,
+                args.symApply ? 1 : 0, args.coarseSolve.c_str(), P.bandedOk ? 1 : 0, P.sparseOk ? 1 : 0, P.coarseNnz, P.bandedResidual, P.bandedOffBandRel,
                 args.coarseBinsX, args.coarseBinsY,
                 static_cast<long long>(P.coarseDim), pool.threads(), S.nf, A.numBlocks(), prepMs,
                 hpSetupMs, opBuildMs, precondBuildMs, ldltSolveMs,
