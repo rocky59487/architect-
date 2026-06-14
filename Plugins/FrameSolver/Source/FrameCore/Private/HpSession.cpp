@@ -601,6 +601,7 @@ struct HpSession::Impl {
     int                               effectiveBasisMax = 0;
     int                               threads = 1;
     ElementOperator                   op;                  // per-element dense operator (frame-only)
+    VecX                              cachedFequiv;        // structure-fixed distributed-load equiv. forces
     std::vector<std::array<real, 36>> blockInv6;           // block6 Jacobi (empty -> scalar Jacobi)
     bool                              useBlock6 = false;
     CoarseOperator                    coarse;               // A2b coarse correction (inactive until prepareCoarse)
@@ -615,6 +616,12 @@ struct HpSession::Impl {
         if (!ps_raw) { diag = "HpSession: null PreparedSystem"; return; }
         const PreparedSystem::Impl& S = *ps_raw;
         if (S.singular) { diag = "HpSession: PreparedSystem is singular: " + S.diagnostic; return; }
+
+        // Distributed-load (UDL / pressure / self-weight) equivalent nodal forces are structure-fixed
+        // — the fingerprint guards their inputs — so cache them once instead of re-scattering every
+        // frame. Built for both frame and shell models (the shell path still needs them for LDLT).
+        cachedFequiv = VecX::Zero(S.N);
+        for (const auto& el : S.elems) el->addEquivalentNodalLoads(cachedFequiv);
 
         if (!op.build(S)) {
             // a non-12-DOF element (shell): frame-only -> HP path not ready, solveFrame uses LDLT.
@@ -762,14 +769,15 @@ SolveResult HpSession::solveFrame(const FrameModel& model, HpSessionStats* stats
         return R;
     }
 
-    // ---- RHS assembly: verbatim from solveLoad (sync if changed) --------------------
-    VecX F = VecX::Zero(N);
+    // ---- RHS assembly: per-frame nodal loads + the cached structure-fixed distributed-load forces
+    // (solveLoad re-scatters addEquivalentNodalLoads every call; the result is identical because
+    // those equivalent forces only depend on fingerprint-guarded geometry/loads). ---------------
+    VecX F = P.cachedFequiv;
     for (const auto& nl : model.nodalLoads) {
         const int ni = model.nodeIndex(nl.node);
         if (ni < 0) continue;
         for (int d = 0; d < 6; ++d) F(gdof(ni, d)) += nl.comp[d];
     }
-    for (const auto& el : S.elems) el->addEquivalentNodalLoads(F);
 
     std::vector<real> presc((size_t)N, 0.0);
     bool anyPresc = false;

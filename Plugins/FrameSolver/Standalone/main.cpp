@@ -3294,6 +3294,20 @@ int main() {
             hpSessVsLdlt("F56-J shell -> LDLT vs solveLoad", got, solveLoad(psSh, mSh));
             checkTrue("F56-J shell frame used LDLT", st.usedLdlt && !st.usedProjection && !st.usedPcg, got.diagnostic);
         }
+        // (K) cached distributed-load forces (frame UDL): the structure-fixed equivalent forces are
+        //     cached once in the ctor; a UDL frame still matches solveLoad (which re-scatters them
+        //     every call). The nodal seed cannot span the UDL response, so this also exercises an
+        //     out-of-subspace PCG on a distributed-load frame.
+        {
+            FrameModel mU; fixtures::simplySupportedUDL(mU, 5.0, 3000.0, mat, sec);
+            PreparedSystem psU = assembleAndFactor(mU);
+            HpSession sU(psU, opt);
+            checkTrue("F56-K UDL session valid", sU.valid(), sU.diagnostic());
+            sU.setLoadBasis({ unitUz(mU, 1, 1.0) });
+            HpSessionStats st;
+            const SolveResult got = sU.solveFrame(mU, &st);
+            hpSessVsLdlt("F56-K frame UDL (cached Fequiv) vs LDLT", got, solveLoad(psU, mU));
+        }
     }
 
     std::printf("\n%s  (failures=%d)\n", g_fail == 0 ? "ALL PASS" : "FAILURES", g_fail);
