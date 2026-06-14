@@ -482,3 +482,105 @@ bit-stable five-leg gate path.
 HP can win (A2 only): game per-frame repeated LOW-DIM load sequences (seeded ~19x, needs a
 load-subspace hint); very large first solves at the LDLT factor wall (nf>~18k, 17-40x);
 very large memory-wall problems (nf>~186k, LDLT infeasible).
+
+## 2026-06-14 Session 5: A2 design blueprint (seeded HpSession + parallel + coarse)
+
+Stage-1 chose the two-lane architecture (clean LDLT solve/solveLoad + opt-in HP) as the
+cleanest; A2 = make HP actually fast in its one game niche (seeded repeated low-dim loads)
+via a seeded-session API, WITHOUT touching default or forcing an auto-unified solve. This is
+the full executable design for the next session (working copy:
+`.claude/plans/valiant-sprouting-crescent.md`).
+
+### go/no-go reality (critical, from the adversarial Plan review)
+
+A seeded in-subspace frame is 0 PCG iters, BUT still needs one matrix-free apply to compute
+the initial residual / confirm convergence. SERIAL apply on a large problem (nf=18720) is
+~14ms > LDLT backsub 10.9ms -> serial has NO win on large problems; serial wins only on small
+ones (nf<~2000, a thin 2-3x). The real game-scale ~19x REQUIRES A2a parallel apply (14ms
+serial -> ~0.9ms at 16T). So A2c (serial) = API + correctness + small-problem speedup +
+paving for A2a; A2a (parallel) = the large-problem win; A2b (banded coarse) = out-of-subspace
+iteration relief (towers only).
+
+### Architecture — HpSession (models ReSolveSession)
+
+Template = ReSolveSession (`Reanalysis.h`/`.cpp`), the only existing stateful-session API:
+PIMPL, all Eigen in Impl, Eigen-free public header, move-only, POD options/result. New
+HpSession holds a NON-owning `const PreparedSystem::Impl*` (caller guarantees it outlives the
+session — std::span-like contract) + its own seeded basis + apply/precond components;
+solveFrame checks the fingerprint each call. Three sub-stages in STRICT dependency order, each
+touching only HpSession.cpp's Impl (HpSession.h API unchanged), each passing the full five-leg
+gate, each its own commit (no parallel dev):
+- A2c: HpSession API + RecycleBasis seeded + Galerkin projection gate + serial apply/Jacobi
+  (reuse A1) + LDLT safety net.
+- A2a: persistent ThreadApplyPool + ElementBlock12 dense apply + parallel block6 -> ~19x.
+- A2b: banded block-tridiagonal coarse + graceful 3-tier fallback -> out-of-subspace relief.
+
+### A2c (do first)
+
+- `Public/FrameCore/HpSession.h` (zero Eigen): `HpSessionOptions{basisMax=64, projGateTol=1e-6,
+  pcgTol=1e-10, pcgMaxIter=500, pcgWarmIter=3, fallbackOnFail=true, enabled=true}`;
+  `HpSessionStats{usedProjection,usedPcg,usedLdlt,pcgIters,initialRel,basisSize}`; `class
+  FRAMECORE_API HpSession{ ctor(const PreparedSystem&, HpSessionOptions={}); move-only;
+  valid(); diagnostic(); bool setLoadBasis(const std::vector<std::vector<real>>&);
+  SolveResult solveFrame(const FrameModel&, HpSessionStats*=nullptr); struct Impl;
+  unique_ptr<Impl> p_; }`. Header comment: PreparedSystem MUST outlive the session (UB else).
+- `Private/HpSession.cpp`: `Impl{ const PreparedSystem::Impl* ps_raw; opts; baseValid; diag;
+  RecycleBasis basis; int effectiveBasisMax; vector<ElemReduced> blocks (mirror A1 build);
+  VecX diag (Jacobi); bool hasShell }`. Move RecycleBasis from exp_parallel_pcg.cpp L1062-1113
+  into the anon namespace (Eigen `vector<VecX> v/av` stays Private). Ctor scans S.elems to build
+  blocks + detect shell (localDof!=12 -> baseValid=false, frame-only).
+- `setLoadBasis`: per 6N global load vector -> fmap reduce -> `ldlt.solve` -> `basis.add`
+  (A-orthonormalize). MUST `effectiveBasisMax = max(basisMax, loadVectors.size())` before
+  rebuilding the basis (FIFO eviction would drop early seeds — A1/B hit this).
+- `solveFrame`: fingerprint guard; RHS assembly VERBATIM from A1 HpSolver.cpp (nodal +
+  addEquivalentNodalLoads + presc reduce + fmap reduce -> Ff); zero-RHS (bnorm<=0) -> uf=0;
+  `x0 = basis.initialGuess(Ff)`; `initialRel = ||Ff - K x0|| / ||Ff||` (one apply); gate:
+  initialRel < projGateTol -> warm-start PCG limited to pcgWarmIter (residual safety net, not
+  raw x0); else full PCG from x0; non-converge / disabled / empty basis -> `ldlt.solve(Ff)`
+  (oracle); scatter / reactions (S.K*u - F) / recover VERBATIM from A1 -> SolveResult +
+  HpSessionStats. Reuse strategy: redo RHS/scatter/recover in HpSession.cpp anon namespace
+  (~40 lines, mark "VERBATIM from solveLoad; sync if changed"); do NOT extract a cross-TU
+  helper (would pollute a Private header / change build deps).
+- F56 standalone gate (main.cpp, after F55): A in-subspace multi-frame vs LDLT <=1e-6
+  (stats.usedProjection); B out-of-subspace triggers gate -> fallback still correct; C
+  disabled/empty -> LDLT bit-identical; D fingerprint guard -> singular; E basisMax auto-expand
+  (5 modes / basisMax=3 -> basisSize=5). Tolerance gate (~1e-6, not bit-exact). Standalone is
+  enough; no UE test; $ExpectedUeTests stays 50.
+- Build: add `HpSession.cpp` to the 3 build.bat (build / build_cli / build_linear_audit); UBT
+  auto-scans Private (no Build.cs edit, per A1); main.cpp adds F56 + `#include`.
+- Blind spots (all known): fingerprint per frame; lifetime dangling (raw ptr -> doc contract +
+  valid() null-check); prescribed in seeded (load vectors are pure nodal, presc=0 assumed;
+  settlement response folded into F by caller); zero-load frame (bnorm<=0 -> uf=0); move
+  semantics (unique_ptr auto, raw ptr stays valid); shell (frame-only, baseValid=false); gate
+  misjudge (PCG/LDLT safety net keeps it correct, just slower); thread (A2c serial, none).
+
+### A2a (parallel apply -> the real large-problem win)
+
+Port ThreadApplyPool (exp_parallel_pcg.cpp L658-815, self-contained cv generation protocol) +
+ElementBlock12 (dense 12x12 per element, replaces A2c's ElemReduced COO; research's
+accumulateRange uses element-local dense matvec to avoid scatter random access) + parallel
+block6. HpSession Impl += `ThreadApplyPool pool`; HpSessionOptions += `int threads=1`; swap the
+applyKff lambda -> `pool.apply`; precond -> `pool.precondBlock6`. **HpSession.h API unchanged.**
+Thread dual-build is SAFE (FrameCore has zero threading precedent today, but std::thread/mutex/
+condition_variable are usable in the UE module — C++20, bUseUnity=true, Win32 — with NO
+Build.cs change; Eigen is non-thread-safe so basis/ldlt stay single-thread and the pool only
+parallelizes element apply via per-thread localY + touched-DOF reduction). Biggest task:
+ElementBlock12 + ridOf()/kEntry() accessors (buildCoarse needs them too). Gate F56-F: parallel
+apply vs serial applyRel<=1e-10 (tolerance); measure per-frame ~19x.
+
+### A2b (banded coarse -> out-of-subspace relief, towers only)
+
+Port Preconditioner::buildCoarse / buildBandedFactor (L434-650): floor-aggregation by node z +
+block-Thomas LDLT. The graceful 3-tier fallback is ALREADY built in (banded fail -> dense LDLT
+-> maxCoarseDofs cap -> coarseDim=0 -> block6 -> scalar Jacobi) and only helps a tower's
+floor-block-tridiagonal structure, auto-falling to block6 for 1D / arbitrary topology (the
+adversarial finding). Swap the Jacobi precond -> block6 + banded coarse; API unchanged. Gate
+F56-G: tower bandedOk=1; cantilever graceful -> block6; both vs LDLT <=1e-6. Only affects
+out-of-subspace frames (in-subspace 0-iter unaffected).
+
+### Do NOT
+
+A2c serial has no large-problem win (honest; ~19x needs A2a); frame-only (shell -> LDLT); port
+ONLY the wins (deflation / sparse-finer-coarse / symApply are negative results, never port);
+never touch default solve/solveLoad/solveLoadHP; LDLT stays oracle/safety-net; strict
+A2c -> A2a -> A2b order, each its own five-leg gate + commit.
