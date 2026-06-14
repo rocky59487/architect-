@@ -14,8 +14,9 @@
 //      pool when opts.threads > 1;
 //   3. the PreparedSystem's LDLT factorization as the always-correct oracle and fallback.
 //
-// The matrix-free operator is built from the prepared elements (S.elems), so it is bit-consistent
-// with K_ff and the accelerated result matches the direct solve to tolerance. Eigen and the
+// The matrix-free operator is built from the prepared elements (S.elems), so it equals K_ff and the
+// accelerated result matches the direct solve to tolerance (the serial apply is bit-consistent with
+// K_ff; the threaded reduction is only tolerance-equal, not bit-identical). Eigen and the
 // threading are confined to this Private .cpp; the public header is POD. The seeded basis and the
 // LDLT stay single-threaded (Eigen is not thread-safe) — only the element apply + block6 map run on
 // the pool. The matrix-free apply, worker pool, block6 and coarse-grid components are adapted from
@@ -430,15 +431,29 @@ public:
         pcRange.assign(static_cast<size_t>(nt), {0, 0});
         applyRange.assign(static_cast<size_t>(nt), {0, 0});
         workers.reserve(static_cast<size_t>(nt));
-        for (int tid = 0; tid < nt; ++tid) {
-            const size_t begin = std::min(nblk, static_cast<size_t>(tid) * chunk);
-            const size_t end = std::min(nblk, begin + chunk);
-            applyRange[static_cast<size_t>(tid)] = {begin, end};
-            const int pb = std::min(nb, tid * pchunk);
-            const int pe = std::min(nb, pb + pchunk);
-            pcRange[static_cast<size_t>(tid)] = {pb, pe};
-            buildTouched(tid, begin, end);
-            workers.emplace_back([this, tid]() { workerLoop(tid); });
+        try {
+            for (int tid = 0; tid < nt; ++tid) {
+                const size_t begin = std::min(nblk, static_cast<size_t>(tid) * chunk);
+                const size_t end = std::min(nblk, begin + chunk);
+                applyRange[static_cast<size_t>(tid)] = {begin, end};
+                const int pb = std::min(nb, tid * pchunk);
+                const int pe = std::min(nb, pb + pchunk);
+                pcRange[static_cast<size_t>(tid)] = {pb, pe};
+                buildTouched(tid, begin, end);
+                workers.emplace_back([this, tid]() { workerLoop(tid); });
+            }
+        } catch (...) {
+            // A worker failed to spawn (e.g. thread-resource exhaustion). Wake and join the ones
+            // already started, then rethrow — otherwise their still-joinable std::thread dtors would
+            // call std::terminate. The HpSession ctor catches this and falls back to the serial path.
+            {
+                std::lock_guard<std::mutex> lock(mu);
+                stop = true;
+                ++generation;
+            }
+            cvStart.notify_all();
+            for (std::thread& w : workers) if (w.joinable()) w.join();
+            throw;
         }
     }
 
@@ -604,13 +619,18 @@ struct HpSession::Impl {
         if (!op.build(S)) {
             // a non-12-DOF element (shell): frame-only -> HP path not ready, solveFrame uses LDLT.
             baseValid = false;
-            diag = "HpSession: shell element present (A2 is frame-only; solveFrame uses LDLT)";
+            diag = "HpSession: shell element present (frame-only; solveFrame uses LDLT)";
             return;
         }
         baseValid = true;
         useBlock6 = buildBlock6(op.diag6, blockInv6);   // false (empty inv6) -> scalar Jacobi
-        if (threads > 1 && op.numBlocks() > 0)
-            pool = std::make_unique<ThreadApplyPool>(op, threads);
+        if (threads > 1 && op.numBlocks() > 0) {
+            try {
+                pool = std::make_unique<ThreadApplyPool>(op, threads);
+            } catch (...) {
+                pool.reset();   // thread-spawn failure -> fall back to serial (still fully functional)
+            }
+        }
         const int actual = pool ? pool->threads() : 1;
         diag = "HpSession: ready (frame-only seeded lane, " +
                std::string(actual > 1 ? "parallel x" + std::to_string(actual) : "serial") + ", " +

@@ -3282,6 +3282,18 @@ int main() {
             checkTrue("F56-I member forces skipped (empty)", got.memberForces.empty(), "");
             checkTrue("F56-I still hits the in-subspace projection", st.usedProjection, "");
         }
+        // (J) SHELL present: HpSession detects a non-beam element -> valid()==false and every frame
+        //     routes to the LDLT oracle (the frame-only guard, end-to-end == solveLoad).
+        {
+            FrameModel mSh; fixtures::squarePlateShell(mSh, 1000.0, 10.0, 4, 0.01, mat);
+            PreparedSystem psSh = assembleAndFactor(mSh);
+            HpSession sSh(psSh, opt);
+            checkTrue("F56-J shell session NOT valid (frame-only)", !sSh.valid(), sSh.diagnostic());
+            HpSessionStats st;
+            const SolveResult got = sSh.solveFrame(mSh, &st);
+            hpSessVsLdlt("F56-J shell -> LDLT vs solveLoad", got, solveLoad(psSh, mSh));
+            checkTrue("F56-J shell frame used LDLT", st.usedLdlt && !st.usedProjection && !st.usedPcg, got.diagnostic);
+        }
     }
 
     std::printf("\n%s  (failures=%d)\n", g_fail == 0 ? "ALL PASS" : "FAILURES", g_fail);

@@ -22,8 +22,10 @@ struct HpSessionOptions {
     int  pcgWarmIter    = 3;       // in-subspace warm-start PCG cap (residual safety net atop x0)
     bool fallbackOnFail = true;    // non-convergence / indefinite -> fall back to LDLT
     bool enabled        = true;    // false => solveFrame is a drop-in equal to solveLoad (LDLT)
-    int  threads        = 1;       // >1 spawns a persistent pool that parallelizes the element apply
-                                   // + block6 Jacobi (the large-problem win); 1 = serial
+    int  threads        = 1;       // >1 spawns a persistent pool (built in the ctor, joined in the
+                                   // dtor) that parallelizes the element apply + block6 Jacobi (the
+                                   // large-problem win); 1 = serial. Reuse ONE session across frames
+                                   // rather than rebuilding it, so the pool's spin-up cost is paid once.
     bool displacementsOnly = false;// fill only SolveResult.u; skip reactions (K*u-F) AND element force
                                    // recovery. For per-frame visuals that need only displacements:
                                    // the reaction/recovery O(nnz)/O(elements) sweep dominates an
@@ -71,12 +73,13 @@ struct HpCoarseInfo {
 // Frame-only: a shell element routes every frame to LDLT. The apply + preconditioner are serial by
 // default; opts.threads > 1 spawns a persistent pool that parallelizes the element apply (the per-
 // frame bottleneck) and the block6 map, while the seeded basis and the LDLT stay single-threaded
-// (Eigen is not thread-safe). Performance niche (honest): this wins ONLY when a fixed structure is
-// re-solved many times under a low-dimensional seeded load family — there the in-subspace projection
-// is ~0 PCG iters and the parallel apply is markedly faster than a reused LDLT back-substitution. It
-// is NOT a general replacement for the direct solve: a single solve, or an arbitrary load that leaves
-// the seeded subspace, is at best on par with (often slower than) a reused LDLT — so solve/solveLoad
-// remain the default and the oracle.
+// (Eigen is not thread-safe). Performance niche (honest, measured end-to-end): this wins ONLY when a
+// fixed structure is re-solved many times under a low-dimensional seeded load family. There the
+// in-subspace projection takes ~0 PCG iters; the full SolveResult runs ~1.6x a reused LDLT (the
+// shared reactions + force recovery dilute the apply-free solve) and a displacementsOnly frame ~5x.
+// It is NOT a general replacement for the direct solve: a single solve, or a load that leaves the
+// seeded subspace, runs a full PCG typically an ORDER OF MAGNITUDE OR MORE slower than a reused LDLT
+// back-substitution — so solve/solveLoad remain the default and the oracle, with LDLT the fallback.
 //
 // LIFETIME CONTRACT: the PreparedSystem MUST outlive the session (the session stores a non-owning
 // pointer into it, like std::span). Moving or destroying it while the session is alive is undefined
@@ -117,6 +120,8 @@ public:
     // Solve the CURRENT model's NODAL loads + PRESCRIBED values, reusing the factorization. The
     // SolveResult (u / reactions / member+shell forces) matches solveLoad to tolerance (PCG tol /
     // factorization round-off); on a mechanism or fingerprint mismatch, SolveResult.singular.
+    // WARNING: with opts.displacementsOnly == true, ONLY u is filled — reactions stay all-zero and
+    // memberForces/shellForces empty (NOT a drop-in for solveLoad; read only u in that mode).
     SolveResult solveFrame(const FrameModel& model, HpSessionStats* stats = nullptr);
 
 private:
