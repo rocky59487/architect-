@@ -3262,6 +3262,26 @@ int main() {
             checkTrue("F56-H settlement moves a free node (non-degenerate)", freeNorm > 1e-9, "freeNorm=" + std::to_string(freeNorm));
             hpSessVsLdlt("F56-H settlement (anyPresc reduce path) vs LDLT", got, solveLoad(psS, mS));
         }
+        // (I) displacements-only fast path: u must match the full solve; reactions are left all-zero
+        //     and member/shell forces empty (the O(nnz)/O(elements) recovery is intentionally skipped).
+        {
+            HpSessionOptions du = opt; du.displacementsOnly = true;
+            HpSession sd(ps, du);
+            checkTrue("F56-I displacements-only session valid", sd.valid(), sd.diagnostic());
+            sd.setLoadBasis({ unitUz(mSeed, 1, 1.0), unitUz(mSeed, nseg, 1.0) });
+            FrameModel m; buildCant(m); setLoad(m, 1, 1234.0);
+            HpSessionStats st;
+            const SolveResult got = sd.solveFrame(m, &st);
+            const SolveResult ref = solveLoad(ps, m);
+            double un = 1e-30, du2 = 0;
+            for (real v : ref.u) un = std::max(un, std::fabs((double)v));
+            for (size_t k = 0; k < got.u.size(); ++k) du2 = std::max(du2, std::fabs((double)got.u[k] - (double)ref.u[k]));
+            checkTrue("F56-I displacements-only u == LDLT u", du2 / un <= 1e-6, "uRel=" + std::to_string(du2 / un));
+            double rmax = 0; for (real v : got.reactions) rmax = std::max(rmax, std::fabs((double)v));
+            checkTrue("F56-I reactions skipped (all-zero)", rmax == 0.0, "rmax=" + std::to_string(rmax));
+            checkTrue("F56-I member forces skipped (empty)", got.memberForces.empty(), "");
+            checkTrue("F56-I still hits the in-subspace projection", st.usedProjection, "");
+        }
     }
 
     std::printf("\n%s  (failures=%d)\n", g_fail == 0 ? "ALL PASS" : "FAILURES", g_fail);

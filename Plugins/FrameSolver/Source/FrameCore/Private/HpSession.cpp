@@ -851,19 +851,24 @@ SolveResult HpSession::solveFrame(const FrameModel& model, HpSessionStats* stats
         if (note.empty()) note = "[HpSession] LDLT (disabled / un-seeded / shell / non-converge)";
     }
 
-    // ---- scatter / reactions / recover: verbatim from solveLoad (sync if changed) ---
+    // ---- scatter (always); reactions + recover (full result, or skipped on the fast path) ----
     VecX u = VecX::Zero(N);
     for (int g = 0; g < N; ++g) u(g) = (S.fmap[g] >= 0) ? uf(S.fmap[g]) : presc[(size_t)g];
     for (int g = 0; g < N; ++g) R.u[(size_t)g] = u(g);
 
-    const VecX Rv = S.K * u - F;
-    for (int g = 0; g < N; ++g) R.reactions[(size_t)g] = Rv(g);
+    if (!P.opts.displacementsOnly) {
+        // reactions / recover: verbatim from solveLoad (sync if changed). On the displacements-only
+        // fast path these O(nnz)/O(elements) sweeps are skipped: reactions stay all-zero (assigned
+        // above) and memberForces/shellForces stay empty.
+        const VecX Rv = S.K * u - F;
+        for (int g = 0; g < N; ++g) R.reactions[(size_t)g] = Rv(g);
 
-    R.memberForces.resize(model.members.size());
-    R.shellForces.resize(model.shells.size());
-    for (size_t e = 0; e < model.members.size(); ++e) R.memberForces[e].member = model.members[e].id;
-    for (size_t s = 0; s < model.shells.size(); ++s)  R.shellForces[s].shell   = model.shells[s].id;
-    for (const auto& el : S.elems) el->recover(u, R);
+        R.memberForces.resize(model.members.size());
+        R.shellForces.resize(model.shells.size());
+        for (size_t e = 0; e < model.members.size(); ++e) R.memberForces[e].member = model.members[e].id;
+        for (size_t s = 0; s < model.shells.size(); ++s)  R.shellForces[s].shell   = model.shells[s].id;
+        for (const auto& el : S.elems) el->recover(u, R);
+    }
     R.pivotMargin = S.pivotMargin;
     R.diagnostic = note;   // which path ran; does not affect the numeric result
     if (stats) *stats = st;

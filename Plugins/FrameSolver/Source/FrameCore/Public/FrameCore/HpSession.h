@@ -24,6 +24,12 @@ struct HpSessionOptions {
     bool enabled        = true;    // false => solveFrame is a drop-in equal to solveLoad (LDLT)
     int  threads        = 1;       // >1 spawns a persistent pool that parallelizes the element apply
                                    // + block6 Jacobi (the large-problem win); 1 = serial
+    bool displacementsOnly = false;// fill only SolveResult.u; skip reactions (K*u-F) AND element force
+                                   // recovery. For per-frame visuals that need only displacements:
+                                   // the reaction/recovery O(nnz)/O(elements) sweep dominates an
+                                   // otherwise apply-free in-subspace frame, so skipping it is the
+                                   // headline win there. Leaves reactions all-zero and memberForces /
+                                   // shellForces empty — opt in only when the caller ignores them.
 };
 
 // Per-frame diagnostics (which path ran, how hard it worked). POD.
